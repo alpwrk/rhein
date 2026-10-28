@@ -1,0 +1,54 @@
+[package]
+name = "livekit"
+version = "0.9.2"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rust Client SDK for LiveKit"
+repository = "https://github.com/livekit/rust-sdks"
+readme = "README.md"
+
+[features]
+# By default ws TLS is not enabled
+default = ["native"]
+
+native = ["livekit-signaling/native"]
+
+# Back-compat alias from when this also selected a runtime.
+tokio = ["native"]
+
+# On Wayland, libwebrtc uses GDBus to communicate with the XDG Desktop Portal.
+# GDBus requires a GLib event loop to be running in your application.
+glib-main-loop = [ "libwebrtc/glib-main-loop" ]
+
+# Note that the following features only change the behavior of tokio-tungstenite.
+# It doesn't change the behavior of libwebrtc/webrtc-sys
+native-tls = ["livekit-signaling/native-tls"]
+native-tls-vendored = ["livekit-signaling/native-tls-vendored"]
+rustls-tls-native-roots = ["livekit-signaling/rustls-tls-native-roots"]
+rustls-tls-webpki-roots = ["livekit-signaling/rustls-tls-webpki-roots"]
+__rustls-tls = ["livekit-signaling/__rustls-tls"]
+__lk-internal = [] # internal features (used by livekit-ffi)
+__lk-e2e-test = ["livekit-data-stream/test-utils"] # end-to-end testing with a LiveKit server
+
+[dependencies]
+livekit-signaling = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e", default-features = false }
+libwebrtc = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e", default-features = false }
+livekit-protocol = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e" }
+livekit-common = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e" }
+livekit-data-stream = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e", default-features = false }
+livekit-datatrack = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e", default-features = false }
+livekit-rpc = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e" }
+prost = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", default-features = false, features = ["sync", "macros", "fs", "time", "rt-multi-thread"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+parking_lot = "0.12"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+thiserror = "1.0"
+lazy_static = "1.4"
+log = "0.4"
+chrono = "0.4.38"
+libloading = "0.8.6"
+bytes = "1.10.1"
+bmrng = "0.5.2"

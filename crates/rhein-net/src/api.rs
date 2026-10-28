@@ -515,6 +515,19 @@ impl Api {
         self.post(&format!("/channels/{}/voice/e2ee", urlencoding::encode(channel_id)), body).await
     }
 
+    /// The call group's commit log since `since`: `{group_id, epoch, commits}`, for a device that
+    /// fell behind and is catching up.
+    pub async fn voice_e2ee_commits(&self, channel_id: &str, since: u64) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/channels/{}/voice/e2ee/commits?since={since}", urlencoding::encode(channel_id))).await
+    }
+
+    /// A member asking for the call's encryption group to be re-founded: every device drops back
+    /// to waiting and the founding member rebuilds from the packages on file. The server refuses
+    /// (409) while the group is re-keying happily.
+    pub async fn voice_e2ee_reset(&self, channel_id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/channels/{}/voice/e2ee/reset", urlencoding::encode(channel_id)), &serde_json::json!({})).await
+    }
+
     /// Who is in a voice channel: `{channel_id, voice_states, watchers}`.
     pub async fn voice_channel(&self, channel_id: &str) -> ApiResult<serde_json::Value> {
         self.get(&format!("/channels/{}/voice", urlencoding::encode(channel_id))).await

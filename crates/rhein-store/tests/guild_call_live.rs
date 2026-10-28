@@ -19,7 +19,7 @@ use rhein_net::{Api, GatewayEvent, auth, discover};
 use rhein_proto::{Event, PresenceState, USER_INTENTS, VoiceServer};
 use rhein_store::conversations::Engine;
 use rhein_store::dm::{Secrets, bring_up};
-use rhein_store::guild_keys::{GuildKeys, Verifier};
+use rhein_store::guild_keys::{GuildKeys, Heard, Verifier};
 use rhein_voice::audio::AudioEngine;
 use rhein_voice::livekit::webrtc::media_stream_track::MediaStreamTrack;
 use rhein_voice::sfu::{self, SfuCall};
@@ -201,11 +201,11 @@ async fn encrypted_call(prefix: &str) -> Option<Encrypted> {
     assert_eq!(key.1, 1);
     let event = next_e2ee(&mut b_events).await;
     assert_eq!(event["op"], "commit");
-    let b_key = kb.hear(&event).await.unwrap().expect("b joins from the welcome");
+    let Heard::Keyed(b_key) = kb.hear(&event).await.unwrap() else { panic!("b joins from the welcome") };
     assert_eq!(b_key, key, "one key for both");
     // a's own commit comes back to it too, and changes nothing.
     let echo = next_e2ee(&mut a_events).await;
-    assert!(ka.hear(&echo).await.unwrap().is_none());
+    assert_eq!(ka.hear(&echo).await.unwrap(), Heard::Same);
     Some(Encrypted { a, b, voice: voice.id, a_api, b_api, ka, key, b_key, a_room, b_room, _gateways: (a_gw, b_gw) })
 }
 

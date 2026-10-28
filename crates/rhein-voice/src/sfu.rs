@@ -16,27 +16,60 @@ use livekit::webrtc::video_source::RtcVideoSource;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::media_stream_track::MediaStreamTrack;
 use livekit::webrtc::prelude::RtcAudioSource;
-use livekit::{Room, RoomEvent, RoomOptions};
+use livekit::{DisconnectReason, Room, RoomEvent, RoomOptions};
 use rhein_proto::SfuSession;
 use tokio::sync::mpsc;
 
 use crate::{CallEvent, Slot};
 
 /// Spends a guild (or DM) join token at `{endpoint}/session`.
-pub async fn session(http: &reqwest::Client, endpoint: &str, join_token: &str) -> Result<SfuSession> {
+pub async fn session(http: &reqwest::Client, endpoint: &str, join_token: &str) -> Result<SfuSession, SessionError> {
     let url = format!("{}/session", endpoint.trim_end_matches('/'));
-    let response = http.post(&url).json(&serde_json::json!({ "token": join_token })).send().await.with_context(|| format!("POST {url}"))?;
+    let response = http.post(&url).json(&serde_json::json!({ "token": join_token })).send().await.map_err(|e| SessionError::unanswered(format!("POST {url}: {e}")))?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(anyhow!("the SFU refused the session ({status}): {body}"));
+        return Err(SessionError::answered(status.as_u16(), format!("the SFU refused the session ({status}): {body}")));
     }
-    let session: SfuSession = response.json().await.context("the SFU's /session answer")?;
+    let session: SfuSession = response.json().await.map_err(|e| SessionError::unanswered(format!("the SFU's /session answer: {e}")))?;
     if session.url.is_empty() || session.token.is_empty() {
-        return Err(anyhow!("the SFU answered without a url or token"));
+        return Err(SessionError::answered(status.as_u16(), "the SFU answered without a url or token".into()));
     }
     Ok(session)
 }
+
+/// A failed dial of the SFU's `/session`, read by the retake ladder: `unanswered` means nobody
+/// answered or the server said it is busy, which time can fix; the rest means the SFU said no,
+/// which it will not take back.
+#[derive(Debug)]
+pub struct SessionError {
+    message: String,
+    status: Option<u16>,
+}
+
+impl SessionError {
+    fn answered(status: u16, message: String) -> SessionError {
+        SessionError { message, status: Some(status) }
+    }
+
+    fn unanswered(message: String) -> SessionError {
+        SessionError { message, status: None }
+    }
+
+    /// True when a server answered no (not 408, 429 or a 5xx): a retake ladder must not outlast
+    /// the answer.
+    pub fn answered_no(&self) -> bool {
+        matches!(self.status, Some(s) if s != 408 && s != 429 && s < 500)
+    }
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SessionError {}
 
 fn slot_of(source: TrackSource) -> Option<Slot> {
     match source {
@@ -112,6 +145,14 @@ impl SfuCall {
 
     pub fn session(&self) -> &SfuSession {
         &self.session
+    }
+
+    /// Installs a freshly minted grant on the live session: the engine re-reads the room's token
+    /// on every resume and full reconnect, so the next network blip is not refused as an expired
+    /// one. A guild call renews its join token at half its lifetime and re-spends it here.
+    pub fn install_session(&mut self, session: SfuSession) {
+        self.room.set_token(session.token.clone());
+        self.session = session;
     }
 
     /// Subscribes to (or drops) one participant's screen share and its sound.
@@ -226,8 +267,20 @@ async fn pump(mut room_events: mpsc::UnboundedReceiver<RoomEvent>, events: mpsc:
             RoomEvent::TrackUnsubscribed { publication, participant, .. } => {
                 slot_of(publication.source()).map(|slot| CallEvent::TrackEnded { from: participant.identity().to_string(), slot })
             }
-            RoomEvent::TrackSubscriptionFailed { participant, error, .. } => Some(CallEvent::Error(format!("{}: {error}", participant.identity()))),
-            RoomEvent::Disconnected { reason } => Some(CallEvent::Error(format!("the SFU disconnected: {reason:?}"))),
+            RoomEvent::TrackSubscriptionFailed { participant, .. } => Some(CallEvent::KeyTrouble { from: participant.identity().to_string() }),
+            RoomEvent::Disconnected { reason } => match reason {
+                // Deliberate teardowns are not voice trouble.
+                DisconnectReason::ClientInitiated | DisconnectReason::RoomClosed | DisconnectReason::RoomDeleted => None,
+                // Another device of ours took the seat; rejoining would take it back.
+                DisconnectReason::DuplicateIdentity => None,
+                // The server removed the seat: a moderator, or a sweep that raced a reconnect.
+                // The caller asks the roster which, then rejoins or leaves — staying connected
+                // to nothing is the one wrong answer.
+                DisconnectReason::ParticipantRemoved => Some(CallEvent::Removed),
+                // The media session is gone while the seat stands: LiveKit already tried to
+                // resume. Recoverable by retaking.
+                reason => Some(CallEvent::Dropped(format!("the SFU disconnected: {reason:?}"))),
+            },
             _ => None,
         };
         if let Some(out) = out

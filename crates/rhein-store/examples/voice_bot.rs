@@ -19,7 +19,7 @@ use rhein_net::gateway::{self, GatewayConfig};
 use rhein_net::{Api, GatewayEvent, auth, discover};
 use rhein_proto::{Event, PresenceState, USER_INTENTS, VoiceServer};
 use rhein_store::dm::{Secrets, bring_up};
-use rhein_store::guild_keys::{GuildKeys, trust_all};
+use rhein_store::guild_keys::{GuildKeys, Heard, trust_all};
 use rhein_voice::audio::AudioEngine;
 use rhein_voice::e2ee;
 use rhein_voice::sfu::{self, SfuCall};
@@ -99,7 +99,10 @@ async fn main() -> anyhow::Result<()> {
             }
             Some(event) = gateway_events.recv() => match event {
                 GatewayEvent::Dispatch(event) => match *event {
-                    Event::VoiceE2ee { data, .. } => keys.hear(&data).await?,
+                    Event::VoiceE2ee { data, .. } => match keys.hear(&data).await? {
+                        Heard::Keyed(key) => Some(key),
+                        _ => None,
+                    },
                     // Someone came or went: the committer changes the group.
                     Event::VoiceStateUpdate(_) => {
                         let here = api.voice_channel(&channel.id).await?;
