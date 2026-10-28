@@ -27,12 +27,18 @@ here="\$(cd "\$(dirname "\$0")" && pwd)"
 prefix="\$HOME/.local" run=()
 [[ \${1:-} == --system ]] && prefix=/usr run=(sudo)
 "\${run[@]}" install -Dm755 "\$here/rhein" "\$prefix/bin/rhein"
-"\${run[@]}" install -Dm644 "\$here/$app_id.desktop" "\$prefix/share/applications/$app_id.desktop"
+# The full path, as graphical sessions often leave ~/.local/bin off their PATH.
+sed "s|^Exec=rhein\\\$|Exec=\$prefix/bin/rhein|" "\$here/$app_id.desktop" \\
+  | "\${run[@]}" install -Dm644 /dev/stdin "\$prefix/share/applications/$app_id.desktop"
 "\${run[@]}" install -Dm644 "\$here/$app_id.png" "\$prefix/share/icons/hicolor/512x512/apps/$app_id.png"
 if command -v update-desktop-database >/dev/null; then
   "\${run[@]}" update-desktop-database -q "\$prefix/share/applications" || true
 fi
 echo "installed into \$prefix; start it with: rhein"
+if [[ \$prefix != /usr && -e /usr/bin/rhein ]]; then
+  echo "note: an older install is still in /usr; remove it with:"
+  echo "  sudo rm /usr/bin/rhein /usr/share/applications/$app_id.desktop /usr/share/icons/hicolor/512x512/apps/$app_id.png"
+fi
 case ":\$PATH:" in *":\$prefix/bin:"*) ;; *) echo "note: \$prefix/bin is not on your PATH" ;; esac
 INSTALL
 chmod +x "$stage/install.sh"

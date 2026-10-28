@@ -38,8 +38,8 @@ The [releases](https://github.com/alpwrk/rhein/releases) have a build for x86_64
 Building Rhein needs a Rust toolchain recent enough for edition 2024 (Rust 1.85 or later), and the first build takes a while because it compiles libwebrtc.
 
 ```sh
-./install                  # check system packages, build, install into /usr (sudo when needed)
-./install --prefix ~/.local
+./install                  # check system packages, build, install into ~/.local
+./install --system         # install into /usr for everyone instead (sudo)
 ./install --build-only     # just target/production/rhein
 ./install --uninstall
 ```

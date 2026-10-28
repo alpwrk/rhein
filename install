@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Builds Rhein for production and installs it system-wide:
+# Builds Rhein for production and installs it for this user:
 #
-#   ./install               build, then install into /usr (asks for sudo when needed)
+#   ./install               build, then install into ~/.local
+#   ./install --system      install into /usr for everyone instead (asks for sudo)
 #   ./install --build-only  build only; the binary is target/production/rhein
 #   ./install --test        run the offline test suite before building
-#   ./install --prefix DIR  install under DIR instead of /usr (e.g. ~/.local)
-#   ./install --uninstall   remove what an install put there
+#   ./install --prefix DIR  install under DIR instead of ~/.local
+#   ./install --uninstall   remove what an install put there (with --system: from /usr)
 #   ./install --yes         install missing system packages without asking
 #   ./install --no-deps     skip the system package check
 #
@@ -19,17 +20,20 @@
 # debug builds only (RHEIN_DEV_*, RHEIN_AUDIO, the localhost sign-in default...). Fonts, icons and
 # sounds are compiled in, so the one binary is the whole program.
 #
-# Installed: <prefix>/bin/rhein, the desktop entry (menus, notifications) and the icon.
-# DESTDIR is honoured, for packaging.
+# Installed: <prefix>/bin/rhein, the desktop entry (menus, notifications) and the icon. The
+# desktop entry names the binary by its full path, as graphical sessions often leave ~/.local/bin
+# off their PATH. The user install is the default so that Rhein will be able to update itself
+# without root. DESTDIR is honoured, for packaging.
 set -euo pipefail
 root="$(cd "$(dirname "$0")" && pwd)"
 cd "$root"
 
-prefix=/usr install=1 test=0 uninstall=0 deps=1 yes=0
+prefix="$HOME/.local" install=1 test=0 uninstall=0 deps=1 yes=0
 while (($#)); do
   case "$1" in
     --build-only) install=0 ;;
     --test) test=1 ;;
+    --system) prefix=/usr ;;
     --prefix)
       [[ $# -ge 2 ]] || { echo "--prefix needs a directory" >&2; exit 2; }
       prefix="${2%/}"
@@ -39,7 +43,7 @@ while (($#)); do
     --uninstall) uninstall=1 ;;
     --yes|-y) yes=1 ;;
     --no-deps) deps=0 ;;
-    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
@@ -198,7 +202,10 @@ fi
 
 echo "· installing into $dest"
 as_owner install -Dm755 "$built" "$bin"
-as_owner install -Dm644 "packaging/$app_id.desktop" "$desktop"
+entry="$(mktemp)"
+trap 'rm -f "$entry"' EXIT
+sed "s|^Exec=rhein\$|Exec=$prefix/bin/rhein|" "packaging/$app_id.desktop" >"$entry"
+as_owner install -Dm644 "$entry" "$desktop"
 as_owner install -Dm644 "packaging/$app_id.png" "$icon"
 for f in "${old_files[@]}"; do
   if [[ -e $f ]]; then as_owner rm -f "$f"; fi
@@ -206,6 +213,9 @@ done
 refresh_caches
 
 echo "done: $bin"
+if [[ $prefix != /usr && -z ${DESTDIR:-} && -e /usr/bin/rhein ]]; then
+  echo "note: an older install is still in /usr; remove it with: ./install --system --uninstall"
+fi
 case ":$PATH:" in
   *":$prefix/bin:"*) echo "start it with: rhein" ;;
   *) echo "note: $prefix/bin is not on your PATH" ;;
