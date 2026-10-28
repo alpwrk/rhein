@@ -1,0 +1,41 @@
+[package]
+name = "livekit-signaling"
+version = "0.1.3"
+edition = "2021"
+license = "Apache-2.0"
+description = "Internal LiveKit signalling client, blind to the transport backend"
+repository = "https://github.com/livekit/rust-sdks"
+readme = "README.md"
+
+[features]
+default = []
+
+# livekit-net's bundled native backend. Without it the transport stays blind:
+# the host must register a livekit_net transport (set_ws_client /
+# set_http_client) before connecting.
+native = ["livekit-net/native"]
+
+# TLS, forwarded to livekit-net (only meaningful with a native backend).
+native-tls              = ["livekit-net/native-tls"]
+native-tls-vendored     = ["livekit-net/native-tls-vendored"]
+rustls-tls-native-roots = ["livekit-net/rustls-tls-native-roots"]
+rustls-tls-webpki-roots = ["livekit-net/rustls-tls-webpki-roots"]
+__rustls-tls            = ["livekit-net/__rustls-tls"]
+
+[dependencies]
+livekit-net = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e", default-features = false }
+livekit-protocol = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e" }
+livekit-common = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e" }
+livekit-region = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e" }
+device-info = "0.1.1"
+thiserror = "2"
+log = "0.4"
+parking_lot = "0.12"
+serde_json = "1.0"
+tokio = { version = "1", default-features = false, features = ["sync", "macros", "signal", "io-util", "net", "time", "rt-multi-thread"] }
+base64 = { version = "0.21", features = ["std"] }
+flate2 = "1"
+http = "1.1"
+os_info = "3.14.0"
+prost = "0.14"
+url = "2.3"

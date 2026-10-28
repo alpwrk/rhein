@@ -79,8 +79,12 @@ openmls = { path = "vendor/openmls" }
 openh264-sys2 = { path = "vendor/openh264-sys2" }
 
 # libwebrtc with RtpTransceiver::set_direction for mesh calls; see vendor/libwebrtc/RHEIN.md.
+# livekit and livekit-signaling with set_token, for renewing a call's join token
+# mid-call; see vendor/livekit/RHEIN.md.
 [patch."https://github.com/livekit/rust-sdks"]
 libwebrtc = { path = "vendor/libwebrtc" }
+livekit = { path = "vendor/livekit" }
+livekit-signaling = { path = "vendor/livekit-signaling" }
 
 # gpui_wgpu with colour emoji fonts allowed as the font of a run; see vendor/gpui_wgpu/RHEIN.md.
 [patch."https://github.com/zed-industries/zed"]

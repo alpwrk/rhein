@@ -12,13 +12,14 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use rhein_voice::livekit::e2ee::key_provider::KeyProvider;
 use rhein_voice::livekit::webrtc::media_stream_track::MediaStreamTrack;
 use rhein_voice::livekit::webrtc::peer_connection_factory::PeerConnectionFactory;
 use rhein_voice::livekit::webrtc::peer_connection_factory::native::PeerConnectionFactoryExt as _;
 use rhein_proto::{VoiceClaim, VoiceServer};
 use rhein_voice::audio::{AudioConfig, AudioEngine};
 use rhein_voice::e2ee;
-use crate::guild_keys::{GuildKeys, Verifier};
+use crate::guild_keys::{GuildKeys, Verifier, Heard};
 use rhein_voice::mesh::{self, Mesh};
 use rhein_voice::posture::{self, Hello, Posture};
 use rhein_voice::screen::{ScreenShare, ShareError};
@@ -29,6 +30,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::*;
+use super::retake;
 
 /// How a call's media travels.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +144,8 @@ enum Command {
     Watch { user: String, on: bool },
     Publish { slot: Slot, video: VideoOut },
     Unpublish(Slot),
+    /// This seat's current self flags, so a retake joins with them.
+    Flags { muted: bool, deafened: bool },
     Leave,
 }
 
@@ -152,6 +156,11 @@ enum Update {
     Link { user: String, up: bool },
     Video { user: String, slot: Slot, feed: Option<VideoFeed> },
     Failed(String),
+    /// A live seat is being retaken: connecting again, not connected.
+    Connecting,
+    /// The call cannot go on from here: the client ends it and, when a reason is carried, says
+    /// why.
+    Ended(Option<String>),
 }
 
 pub use crate::prefs::VoicePrefs;
@@ -316,12 +325,27 @@ impl Client {
             }
             let roster = this.read_with(cx, |this, _| this.call_roster()).unwrap_or_default();
             let Dialed { joined, privacy, guild, .. } = dialed;
-            io.spawn(drive(me, route, http, joined.voice_server, engine, roster, privacy, guild, command_rx, updates));
+            let flags = this.read_with(cx, |this, _| (this.prefs.voice.muted, this.prefs.voice.deafened)).unwrap_or((false, false));
+            io.spawn(drive(me, route, http, joined.voice_server, engine, roster, privacy, guild, command_rx, updates, flags));
             // The committer's first look at who waits.
             this.update(cx, |this, _| this.tend_guild_keys()).ok();
 
             while let Some(update) = update_rx.recv().await {
                 let alive = this.update(cx, |this, cx| {
+                    // The call is over from the call task's side (the server removed the seat,
+                    // or the seat could not be retaken): end it as a hang-up would.
+                    if matches!(update, Update::Ended(_)) {
+                        let reason = match update {
+                            Update::Ended(reason) => reason,
+                            _ => None,
+                        };
+                        this.leave_voice(cx);
+                        if let Some(reason) = reason {
+                            this.error = Some(reason.into());
+                        }
+                        cx.notify();
+                        return true;
+                    }
                     let Some(call) = this.call.as_mut() else { return false };
                     match update {
                         Update::Connected(mode) => {
@@ -350,6 +374,9 @@ impl Client {
                             }
                         },
                         Update::Failed(err) => call.status = CallStatus::Failed(err),
+                        Update::Connecting => call.status = CallStatus::Connecting,
+                        // Handled above, before the call is borrowed.
+                        Update::Ended(_) => {}
                     }
                     cx.notify();
                     true
@@ -611,6 +638,9 @@ impl Client {
             call.muted = muted;
             call.deafened = deafened;
         }
+        if let Some(commands) = self.call.as_ref().and_then(|c| c.commands.as_ref()) {
+            let _ = commands.send(Command::Flags { muted, deafened });
+        }
         if let Some(route) = self.route() {
             self.io.spawn(async move { route.flags(muted, deafened).await });
         }
@@ -665,6 +695,34 @@ impl Client {
         let me = self.home.as_ref().map(|h| h.user_id.as_str());
         if Some(state.user_id.as_str()) == me {
             match state.channel_id.as_deref() {
+                // Disconnected by the server (kicked, swept) — but a sweep that raced a
+                // reconnect looks like a kick, and ending the call is the one outcome nobody
+                // wants twice. For a guild call the server's own answer decides: gone, the call
+                // ends with the seat; still there, it goes on. A conversation's call follows the
+                // frame.
+                None if !call.conversation => {
+                    let Some(route) = self.route_of(&call) else {
+                        self.call = None;
+                        self.claim_voice(cx);
+                        cx.notify();
+                        return;
+                    };
+                    let (io, me, channel) = (self.io.clone(), me.map(str::to_owned).unwrap_or_default(), call.channel_id.clone());
+                    cx.spawn(async move |this, cx| {
+                        if !io.spawn(async move { route.seat_held(&me).await }).await.unwrap_or(false) {
+                            return;
+                        }
+                        this.update(cx, |this, cx| {
+                            if this.call.as_ref().is_some_and(|c| c.channel_id == channel) {
+                                this.leave_voice(cx);
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                    return;
+                }
                 // Disconnected by the server (kicked, swept): the call is over.
                 None => {
                     self.call = None;
@@ -964,6 +1022,84 @@ impl Client {
     }
 }
 
+/// How often a guild call asks the server where its encryption group stands, so a device that
+/// missed a commit without its gateway noticing does not stay a commit behind for the rest of
+/// the call.
+const AUDIT_PERIOD: Duration = Duration::from_secs(45);
+
+/// How long a failed track subscription holds its tongue before it asks about the encryption
+/// group again: media that fails to open is a symptom, not a question to hammer the server with.
+const KEY_TROUBLE_THROTTLE: Duration = Duration::from_secs(5);
+
+/// A failed renewal is retried after this long, so the grant the call resumes with never
+/// expires.
+const RENEW_RETRY: Duration = Duration::from_secs(30);
+
+/// The grant is renewed at half the join token's lifetime, never less than a minute apart.
+fn renew_after(ttl: u64) -> Duration {
+    Duration::from_secs((ttl / 2).max(60))
+}
+
+/// A dial the call already knows cannot succeed — a guard said no: the retake ladder takes the
+/// short way, since the answer will not change.
+#[derive(Debug)]
+struct Refused(String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+fn refused(reason: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::Error::new(Refused(reason.to_string()))
+}
+
+/// What the call task carries across seats and arms.
+struct SeatState {
+    roster: Vec<String>,
+    privacy: Option<Privacy>,
+    /// A guild call's keys (on an SFU the media key comes from them).
+    guild: Option<GuildKeys>,
+    /// This seat's self flags, so a retake joins with them.
+    flags: (bool, bool),
+}
+
+/// Where a seat ended and the call goes on: `next` is where to dial next, or the call is over.
+struct Seat {
+    next: Option<VoiceServer>,
+    state: SeatState,
+}
+
+/// Why the seat's media session ended, and what the seat does about it.
+enum SeatEnd {
+    /// The server pointed the call somewhere else: dial there.
+    Moved(VoiceServer),
+    /// The caller left (or the client dropped the call).
+    Left,
+    /// The server removed the seat and the roster no longer holds it: the call is over.
+    Gone,
+    /// The media session ended while the seat stands: retake it.
+    Dropped(String),
+    /// This device can no longer follow the call's encryption: a re-founded group is asked for,
+    /// then the seat is retaken.
+    KeysLost,
+}
+
+/// What waiting out a recovery rung came to.
+enum Wait {
+    /// The next attempt may run.
+    Rung,
+    /// The server moved the call while the ladder waited.
+    Moved(VoiceServer),
+    /// The caller left.
+    Left,
+    /// The rungs are spent: the seat is given up (the client has been told).
+    Spent,
+}
+
 /// What dialling a call brought back.
 struct Dialed {
     joined: rhein_proto::VoiceJoin,
@@ -1022,6 +1158,57 @@ impl Route {
             && let Err(err) = api.voice_watch(channel, user, on, None).await
         {
             log::warn!("watch {user}: {err}");
+        }
+    }
+
+    /// Makes the join again for a seat the call lost: the answer says where the call lives now
+    /// (the server may have moved it, or answer with a mesh). `wants_sfu` is a conversation's
+    /// posture bit; `key_package` is a guild call's fresh offer.
+    async fn join(&self, flags: (bool, bool), wants_sfu: bool, key_package: Option<&str>) -> Result<rhein_proto::VoiceJoin, rhein_net::ApiError> {
+        let (muted, deafened) = flags;
+        match self {
+            Route::Channel { api, channel } => api.voice_join(channel, muted, deafened, false, None, key_package).await,
+            Route::Conversation { api, id } => api.conversation_voice_join(id, muted, deafened, wants_sfu, false).await,
+        }
+    }
+
+    /// Whether the server still holds this user's seat: a removal that raced a reconnect looks
+    /// like a kick until the roster says otherwise.
+    async fn seat_held(&self, me: &str) -> bool {
+        let answer = match self {
+            Route::Channel { api, channel } => api.voice_channel(channel).await,
+            Route::Conversation { api, id } => api.conversation_voice(id).await,
+        };
+        match answer {
+            Ok(view) => view["voice_states"].as_array().is_some_and(|ss| ss.iter().any(|s| s["user_id"].as_str() == Some(me))),
+            // Unreadable is not gone: the seat is retaken, and the roster settles it either way.
+            Err(err) => {
+                log::warn!("reading the call's roster: {err}");
+                true
+            }
+        }
+    }
+
+    /// Asks for the call's encryption group to be re-founded, for when this device can no longer
+    /// follow it (guild calls only; best effort — the server refuses while the group is re-keying
+    /// happily).
+    async fn reset_keys(&self) {
+        if let Route::Channel { api, channel } = self
+            && let Err(err) = api.voice_e2ee_reset(channel).await
+        {
+            log::debug!("guild call: asking for a fresh encryption group: {err}");
+        }
+    }
+
+    /// Mints a fresh join token for the seat this call already holds. Only a guild channel can
+    /// re-mint mid-call; a conversation's SFU session cannot be renewed.
+    async fn fresh_token(&self) -> Option<String> {
+        match self {
+            Route::Channel { api, channel } => match api.voice_token(channel).await.ok()? {
+                VoiceServer::Sfu { token, .. } => (!token.is_empty()).then_some(token),
+                _ => None,
+            },
+            Route::Conversation { .. } => None,
         }
     }
 }
@@ -1103,12 +1290,17 @@ async fn drive(
     mut guild: Option<GuildKeys>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     updates: mpsc::UnboundedSender<Update>,
+    mut flags: (bool, bool),
 ) {
+    // Whether a call's media ever came up: only then is a failed dial a seat to retake rather
+    // than the person's own join failing.
+    let mut begun = false;
     // Signals leave one at a time and in order: an answer overtaking its offer is a failed call.
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<(String, Value)>();
+    let signal_route = route.clone();
     tokio::spawn(async move {
         while let Some((target, payload)) = signal_rx.recv().await {
-            if let Err(err) = route.signal(&target, &payload).await {
+            if let Err(err) = signal_route.signal(&target, &payload).await {
                 log::debug!("call signal to {target}: {err}");
             }
         }
@@ -1188,6 +1380,7 @@ async fn drive(
                             Some(Command::Server(new)) => break Some(new),
                             // A mesh guild call is DTLS peer to peer; its group matters on an SFU.
                             Some(Command::Watch { .. } | Command::GuildE2ee(_) | Command::GuildRoster(_)) => {}
+                            Some(Command::Flags { muted, deafened }) => flags = (muted, deafened),
                             Some(Command::Publish { slot, video }) => {
                                 let track: MediaStreamTrack = call.factory().create_video_track(if slot == Slot::Screen { "screen" } else { "camera" }, video.source()).into();
                                 call.set_source(slot, Some(track));
@@ -1202,122 +1395,30 @@ async fn drive(
                     }
                 }
             }
-            VoiceServer::Sfu { endpoint, token, region, custom, e2ee: required, .. } => {
-                // A conversation's SFU never gets plaintext: no media key, no call.
-                let keys = match &privacy {
-                    Some(p) => match &p.media {
-                        Some((key, epoch)) => Ok(Some(e2ee::key_provider(key, *epoch))),
-                        None => Err(anyhow!("This device has no keys for this conversation yet, so it cannot join an encrypted call.")),
+            VoiceServer::Sfu { .. } => {
+                let seat = sfu_seat(
+                    &me,
+                    &route,
+                    &http,
+                    server.clone(),
+                    &engine,
+                    SeatState {
+                        roster: std::mem::take(&mut roster),
+                        privacy: privacy.take(),
+                        guild: guild.take(),
+                        flags,
                     },
-                    // A guild call's key comes from its own group. Until the welcome arrives the
-                    // provider holds a key nobody has, so nothing is heard and nothing goes out
-                    // readable.
-                    None if guild.is_some() => {
-                        let (key, epoch) = guild.as_ref().and_then(|g| g.key()).unwrap_or_else(|| (rhein_mls::vault::rand_bytes::<32>().to_vec(), 0));
-                        Ok(Some(e2ee::key_provider(&key, epoch)))
-                    }
-                    None if required.is_some() => Err(anyhow!("This call must be end-to-end encrypted, and this device has no key to offer it yet.")),
-                    // Every guild call on an SFU is end-to-end encrypted under its own group. An
-                    // answer without one would carry the call in the clear: refused, as the web
-                    // client does.
-                    None => Err(anyhow!("This server offered the call through an SFU without end-to-end encryption, so Rhein does not join it.")),
-                };
-                let joined = match keys {
-                    Err(err) => Err(err),
-                    Ok(_) if custom && endpoint.is_empty() => Err(anyhow!("This conversation uses its own SFU, whose address this device does not know yet.")),
-                    Ok(provider) => match sfu::session(&http, &endpoint, &token).await {
-                        Ok(session) => SfuCall::connect(session, engine.microphone(), provider.clone()).await.map(|c| (c, provider)),
-                        Err(err) => Err(err),
-                    },
-                };
-                match joined {
-                    Ok(((mut call, mut events), provider)) => {
-                        let _ = updates.send(Update::Connected(CallMode::Sfu { region }));
-                        if let Some(effective) = greet(&mut privacy, &roster) {
-                            let _ = updates.send(Update::Posture(effective));
-                        }
-                        let next = loop {
-                            tokio::select! {
-                                command = commands.recv() => match command {
-                                    Some(Command::Watch { user, on }) => call.watch(&user, on),
-                                    Some(Command::Publish { slot, video }) => {
-                                        if let Err(err) = call.publish_video(slot, &video).await {
-                                            let _ = updates.send(Update::Failed(format!("{err:#}")));
-                                        }
-                                    }
-                                    Some(Command::Unpublish(slot)) => call.unpublish(slot).await,
-                                    Some(Command::Keys { hello, media }) => {
-                                        // An epoch change rekeys; the ring keeps the last keys for a
-                                        // peer a commit behind.
-                                        if let (Some(provider), Some((key, epoch))) = (&provider, &media) {
-                                            call.rekey(provider, key, *epoch);
-                                        }
-                                        if let Some(p) = privacy.as_mut() {
-                                            p.rekey(hello, media);
-                                        }
-                                        greet(&mut privacy, &roster);
-                                    }
-                                    Some(Command::Server(new)) if same_place(&server, &new) => {}
-                                    Some(Command::Server(new)) => break Some(new),
-                                    Some(Command::Signal { from, payload }) => {
-                                        if let Some(sealed) = payload.get("hello")
-                                            && privacy.as_mut().is_some_and(|p| p.hear(&from, sealed))
-                                            && let Some(effective) = greet(&mut privacy, &roster)
-                                        {
-                                            let _ = updates.send(Update::Posture(effective));
-                                        }
-                                    }
-                                    Some(Command::Roster(users)) => {
-                                        roster = users;
-                                        greet(&mut privacy, &roster);
-                                    }
-                                    Some(Command::GuildE2ee(event)) => {
-                                        log::debug!("guild call: {} for epoch {}", event["op"], event["epoch"]);
-                                        let moved = match guild.as_mut() {
-                                            Some(keys) => keys.hear(&event).await,
-                                            None => Ok(None),
-                                        };
-                                        match moved {
-                                            Ok(Some((key, epoch))) => {
-                                                log::debug!("guild call: key for epoch {epoch}");
-                                                if let Some(provider) = &provider {
-                                                    call.rekey(provider, &key, epoch);
-                                                }
-                                            }
-                                            Ok(None) => {}
-                                            // A device nobody vouched for, or a lost epoch: leave, and say why.
-                                            Err(err) => {
-                                                let _ = updates.send(Update::Failed(format!("{err:#}")));
-                                                break None;
-                                            }
-                                        }
-                                    }
-                                    Some(Command::GuildRoster(states)) => {
-                                        if let Some(keys) = guild.as_mut() {
-                                            match keys.tend(&states).await {
-                                                Ok(Some((key, epoch))) => {
-                                                    if let Some(provider) = &provider {
-                                                        call.rekey(provider, &key, epoch);
-                                                    }
-                                                }
-                                                Ok(None) => {}
-                                                Err(err) => log::warn!("guild call keys: {err:#}"),
-                                            }
-                                        }
-                                    }
-                                    Some(Command::Leave) | None => break None,
-                                },
-                                Some(event) = events.recv() => media(&engine, &updates, event),
-                            }
-                        };
-                        call.close().await;
-                        next
-                    }
-                    Err(err) => {
-                        let _ = updates.send(Update::Failed(format!("{err:#}")));
-                        stand_by(&mut commands, &mut roster, &mut privacy).await
-                    }
-                }
+                    signal_tx.clone(),
+                    &mut commands,
+                    &updates,
+                    &mut begun,
+                )
+                .await;
+                roster = seat.state.roster;
+                privacy = seat.state.privacy;
+                guild = seat.state.guild;
+                flags = seat.state.flags;
+                seat.next
             }
         };
         match next {
@@ -1345,6 +1446,383 @@ async fn stand_by(
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// The guards and the dial of one SFU seat: who may join, and the room they join.
+async fn dial(
+    http: &reqwest::Client,
+    endpoint: &str,
+    token: &str,
+    custom: bool,
+    required: Option<&str>,
+    privacy: &Option<Privacy>,
+    guild: &Option<GuildKeys>,
+    engine: &Arc<AudioEngine>,
+) -> Result<(SfuCall, mpsc::UnboundedReceiver<CallEvent>, Option<KeyProvider>)> {
+    // A conversation's SFU never gets plaintext: no media key, no call.
+    let keys = match privacy {
+        Some(p) => match &p.media {
+            Some((key, epoch)) => Ok(Some(e2ee::key_provider(key, *epoch))),
+            None => Err(refused("This device has no keys for this conversation yet, so it cannot join an encrypted call.")),
+        },
+        // A guild call's key comes from its own group. Until the welcome arrives the provider
+        // holds a key nobody has, so nothing is heard and nothing goes out readable.
+        None if guild.is_some() => {
+            let (key, epoch) = guild
+                .as_ref()
+                .and_then(|g| g.key())
+                .unwrap_or_else(|| (rhein_mls::vault::rand_bytes::<32>().to_vec(), 0));
+            Ok(Some(e2ee::key_provider(&key, epoch)))
+        }
+        None if required.is_some() => Err(refused("This call must be end-to-end encrypted, and this device has no key to offer it yet.")),
+        // Every guild call on an SFU is end-to-end encrypted under its own group. An answer
+        // without one would carry the call in the clear: refused, as the web client does.
+        None => Err(refused("This server offered the call through an SFU without end-to-end encryption, so Rhein does not join it.")),
+    };
+    match keys {
+        Err(err) => Err(err),
+        Ok(_) if custom && endpoint.is_empty() => Err(refused("This conversation uses its own SFU, whose address this device does not know yet.")),
+        Ok(provider) => {
+            let session = sfu::session(http, endpoint, token).await?;
+            SfuCall::connect(session, engine.microphone(), provider.clone()).await.map(|(call, events)| (call, events, provider))
+        }
+    }
+}
+
+/// Whether a failed dial can hope for a different answer: guards that already know the call
+/// cannot be dialled said so, and an SFU that answered no did too.
+fn dial_answered_no(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<Refused>().is_some()
+        || err.downcast_ref::<sfu::SessionError>().is_some_and(|e| e.answered_no())
+        || err.downcast_ref::<rhein_net::ApiError>().is_some_and(|e| !retake::join_unanswered(e))
+}
+
+/// Waits out the next rung of the retake ladder — `attempt` is the number of failed attempts of
+/// this recovery so far — while the caller may still escape (another channel, a hang-up) or the
+/// server may move the call.
+async fn wait_out(
+    rungs: &'static [Duration],
+    attempt: usize,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    state: &mut SeatState,
+) -> Wait {
+    let Some(wait) = attempt.checked_sub(1).and_then(|i| rungs.get(i)) else {
+        return Wait::Spent;
+    };
+    let deadline = tokio::time::Instant::now() + *wait;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => return Wait::Rung,
+            command = commands.recv() => match command {
+                Some(Command::Server(new)) => return Wait::Moved(new),
+                Some(Command::Leave) | None => return Wait::Left,
+                Some(Command::Roster(users)) => state.roster = users,
+                Some(Command::Keys { hello, media }) => {
+                    if let Some(p) = state.privacy.as_mut() {
+                        p.rekey(hello, media);
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+}
+
+/// Mints a fresh join token for the seat and installs its grant on the live room, so the first
+/// network blip after the old grant's expiry is a resume, not a full reconnect.
+async fn renew_token(route: &Route, http: &reqwest::Client, endpoint: &str, call: &mut SfuCall) -> Result<()> {
+    let Some(join_token) = route.fresh_token().await else {
+        anyhow::bail!("the server would not mint a fresh join token for this session");
+    };
+    let session = sfu::session(http, endpoint, &join_token).await?;
+    call.install_session(session);
+    Ok(())
+}
+
+/// The media side of one seat on an SFU, from its first dial to the seat's end. A standing seat
+/// that loses its media is retaken: the join is remade on the retake ladder, so an SFU that is
+/// restarting is outlived instead of ejecting everyone from the channel — and a server that
+/// answered no gets the short ladder, since the answer will not change.
+#[allow(clippy::too_many_arguments)]
+async fn sfu_seat(
+    me: &str,
+    route: &Route,
+    http: &reqwest::Client,
+    mut server: VoiceServer,
+    engine: &Arc<AudioEngine>,
+    mut state: SeatState,
+    signal_tx: mpsc::UnboundedSender<(String, Value)>,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    updates: &mpsc::UnboundedSender<Update>,
+    begun: &mut bool,
+) -> Seat {
+    // Hellos to whoever has not had one this epoch, and the posture that follows.
+    let greet = |state: &mut SeatState| -> Option<Posture> {
+        let privacy = state.privacy.as_mut()?;
+        for (target, payload) in privacy.greetings(me, &state.roster) {
+            let _ = signal_tx.send((target, payload));
+        }
+        Some(privacy.effective(me, &state.roster))
+    };
+    // Whether the seat is made by the join in hand (`server` is its answer) or has to be remade
+    // first: from the first connection on, a standing seat is always remade.
+    let mut needs_join = false;
+    // Failed attempts of the recovery in progress; a recovery that connected starts fresh.
+    let mut attempt = 0usize;
+    loop {
+        if needs_join {
+            let _ = updates.send(Update::Connecting);
+            server = 'join: loop {
+                let package = state.guild.as_mut().and_then(|k| k.offer().ok());
+                let wants_sfu = state.privacy.as_ref().is_some_and(|p| posture::wants_sfu(p.own, false));
+                match route.join(state.flags, wants_sfu, package.as_deref()).await {
+                    Ok(joined) => {
+                        // The group may have moved on while the seat was gone.
+                        if let (Some(keys), Some(info)) = (state.guild.as_mut(), joined.e2ee.clone())
+                            && let Err(err) = keys.begin(&info).await
+                        {
+                            // A device nobody vouched for: leave, and say why.
+                            let _ = updates.send(Update::Ended(Some(format!("{err:#}"))));
+                            return Seat { next: None, state };
+                        }
+                        if !matches!(joined.voice_server, VoiceServer::Sfu { .. }) {
+                            // The call does not live on an SFU any more (a conversation's
+                            // sequencer may answer with a mesh): the drive takes that arm.
+                            return Seat { next: Some(joined.voice_server), state };
+                        }
+                        break 'join joined.voice_server;
+                    }
+                    Err(err) => {
+                        log::warn!("remaking the seat: {err}");
+                        attempt += 1;
+                        match wait_out(retake::ladder(&err), attempt, commands, &mut state).await {
+                            Wait::Rung => continue 'join,
+                            Wait::Moved(new) => return Seat { next: Some(new), state },
+                            Wait::Left => return Seat { next: None, state },
+                            Wait::Spent => {
+                                let _ = updates.send(Update::Ended(Some(format!("Could not rejoin the call: {err}"))));
+                                return Seat { next: None, state };
+                            }
+                        }
+                    }
+                }
+            };
+        }
+        let VoiceServer::Sfu { endpoint, token, region, custom, e2ee: required, token_ttl, .. } = server.clone() else {
+            return Seat { next: Some(server), state };
+        };
+        let connected = dial(http, &endpoint, &token, custom, required.as_deref(), &state.privacy, &state.guild, engine).await;
+        let (mut call, mut events, provider) = match connected {
+            Ok(connected) => {
+                *begun = true;
+                let _ = updates.send(Update::Connected(CallMode::Sfu { region }));
+                if let Some(effective) = greet(&mut state) {
+                    let _ = updates.send(Update::Posture(effective));
+                }
+                connected
+            }
+            Err(err) => {
+                if !*begun {
+                    // The first dial of the call is the person's own attempt: say it failed and
+                    // wait for the server to point the call elsewhere.
+                    log::warn!("joining the SFU call: {err:#}");
+                    let _ = updates.send(Update::Failed(format!("{err:#}")));
+                    let next = stand_by(commands, &mut state.roster, &mut state.privacy).await;
+                    return Seat { next, state };
+                }
+                log::warn!("dialling the SFU call: {err:#}");
+                attempt += 1;
+                let rungs = if dial_answered_no(&err) { &retake::RETAKE_BACKOFF[..] } else { &retake::RETAKE_UNREACHABLE_BACKOFF[..] };
+                match wait_out(rungs, attempt, commands, &mut state).await {
+                    Wait::Rung => continue,
+                    Wait::Moved(new) => return Seat { next: Some(new), state },
+                    Wait::Left => return Seat { next: None, state },
+                    Wait::Spent => {
+                        let _ = updates.send(Update::Ended(Some(format!("Could not rejoin the call: {err:#}"))));
+                        return Seat { next: None, state };
+                    }
+                }
+            }
+        };
+
+        // A guild call asks its encryption group where it stands now and then, and renews its
+        // join token at half its lifetime; a conversation's session can do neither.
+        let mut audit_at = state.guild.as_ref().map(|_| tokio::time::Instant::now() + AUDIT_PERIOD);
+        let mut renew_at = token_ttl.filter(|_| state.guild.is_some()).map(|ttl| tokio::time::Instant::now() + renew_after(ttl));
+        let mut key_check_at = tokio::time::Instant::now();
+        // Every way out of the loop breaks with a reason.
+        let end = loop {
+            tokio::select! {
+                command = commands.recv() => match command {
+                    Some(Command::Watch { user, on }) => call.watch(&user, on),
+                    Some(Command::Publish { slot, video }) => {
+                        if let Err(err) = call.publish_video(slot, &video).await {
+                            let _ = updates.send(Update::Failed(format!("{err:#}")));
+                        }
+                    }
+                    Some(Command::Unpublish(slot)) => call.unpublish(slot).await,
+                    Some(Command::Keys { hello, media }) => {
+                        // An epoch change rekeys; the ring keeps the last keys for a peer a
+                        // commit behind.
+                        if let (Some(provider), Some((key, epoch))) = (&provider, &media) {
+                            call.rekey(provider, key, *epoch);
+                        }
+                        if let Some(p) = state.privacy.as_mut() {
+                            p.rekey(hello, media);
+                        }
+                        greet(&mut state);
+                    }
+                    Some(Command::Flags { muted, deafened }) => state.flags = (muted, deafened),
+                    Some(Command::Server(new)) if same_place(&server, &new) => {}
+                    Some(Command::Server(new)) => break SeatEnd::Moved(new),
+                    Some(Command::Signal { from, payload }) => {
+                        if let Some(sealed) = payload.get("hello")
+                            && state.privacy.as_mut().is_some_and(|p| p.hear(&from, sealed))
+                            && let Some(effective) = greet(&mut state)
+                        {
+                            let _ = updates.send(Update::Posture(effective));
+                        }
+                    }
+                    Some(Command::Roster(users)) => {
+                        state.roster = users;
+                        greet(&mut state);
+                    }
+                    Some(Command::GuildE2ee(event)) => {
+                        log::debug!("guild call: {} for epoch {}", event["op"], event["epoch"]);
+                        let heard = match state.guild.as_mut() {
+                            Some(keys) => match keys.hear(&event).await {
+                                // Behind the group (a missed reset or commit): ask where it
+                                // stands now, not at the next roster move.
+                                Ok(Heard::Behind) => keys.check().await.map(|key| key.map_or(Heard::Same, Heard::Keyed)),
+                                other => other,
+                            },
+                            None => Ok(Heard::Same),
+                        };
+                        match heard {
+                            Ok(Heard::Keyed((key, epoch))) => {
+                                log::debug!("guild call: key for epoch {epoch}");
+                                if let Some(provider) = &provider {
+                                    call.rekey(provider, &key, epoch);
+                                }
+                            }
+                            // The committer will never add this session's package: a fresh group
+                            // is asked for, and the seat retaken with a fresh one.
+                            Ok(Heard::Left) => break SeatEnd::KeysLost,
+                            Ok(_) => {}
+                            // This device cannot follow the group any more: a fresh one is asked
+                            // for, and the seat retaken.
+                            Err(err) => {
+                                log::warn!("guild call keys: {err:#}");
+                                break SeatEnd::KeysLost;
+                            }
+                        }
+                    }
+                    Some(Command::GuildRoster(states)) => {
+                        if let Some(keys) = state.guild.as_mut() {
+                            match keys.tend(&states).await {
+                                Ok(Some((key, epoch))) => {
+                                    if let Some(provider) = &provider {
+                                        call.rekey(provider, &key, epoch);
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(err) => log::warn!("guild call keys: {err:#}"),
+                            }
+                        }
+                    }
+                    Some(Command::Leave) | None => break SeatEnd::Left,
+                },
+                Some(event) = events.recv() => match event {
+                    CallEvent::Removed => {
+                        // The server tore this seat down: a moderator, or the sweeper racing a
+                        // reconnect. The roster decides between rejoining and leaving; staying
+                        // connected to a dead room is the one wrong reaction.
+                        break if route.seat_held(me).await {
+                            SeatEnd::Dropped("the server ended this call's media session".into())
+                        } else {
+                            SeatEnd::Gone
+                        };
+                    }
+                    CallEvent::Dropped(reason) => break SeatEnd::Dropped(reason),
+                    CallEvent::KeyTrouble { .. } => {
+                        // This device is opening nobody's media: it is probably a commit behind.
+                        // Ask the group where it stands, but not on every failed track.
+                        if tokio::time::Instant::now() >= key_check_at
+                            && let Some(keys) = state.guild.as_mut()
+                        {
+                            key_check_at = tokio::time::Instant::now() + KEY_TROUBLE_THROTTLE;
+                            match keys.check().await {
+                                Ok(Some((key, epoch))) => {
+                                    if let Some(provider) = &provider {
+                                        call.rekey(provider, &key, epoch);
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    log::warn!("guild call keys: {err:#}");
+                                    break SeatEnd::KeysLost;
+                                }
+                            }
+                        }
+                    }
+                    event => media(engine, updates, event),
+                },
+                // A missed commit does not wait for a roster move to be noticed.
+                _ = tokio::time::sleep_until(audit_at.unwrap_or_else(tokio::time::Instant::now)), if audit_at.is_some() => {
+                    audit_at = Some(tokio::time::Instant::now() + AUDIT_PERIOD);
+                    if let Some(keys) = state.guild.as_mut() {
+                        match keys.check().await {
+                            Ok(Some((key, epoch))) => {
+                                if let Some(provider) = &provider {
+                                    call.rekey(provider, &key, epoch);
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                log::warn!("guild call keys: {err:#}");
+                                break SeatEnd::KeysLost;
+                            }
+                        }
+                    }
+                }
+                // The grant is kept fresh, so the first blip after its expiry is a resume.
+                _ = tokio::time::sleep_until(renew_at.unwrap_or_else(tokio::time::Instant::now)), if renew_at.is_some() => {
+                    renew_at = Some(tokio::time::Instant::now() + RENEW_RETRY);
+                    match renew_token(route, http, &endpoint, &mut call).await {
+                        Ok(()) => {
+                            if let Some(ttl) = token_ttl {
+                                renew_at = Some(tokio::time::Instant::now() + renew_after(ttl));
+                            }
+                        }
+                        Err(err) => log::warn!("renewing the call's join token: {err:#}"),
+                    }
+                }
+            }
+        };
+        call.close().await;
+        match end {
+            SeatEnd::Moved(new) => return Seat { next: Some(new), state },
+            SeatEnd::Left => return Seat { next: None, state },
+            SeatEnd::Gone => {
+                let _ = updates.send(Update::Ended(Some("You were removed from the voice channel.".into())));
+                return Seat { next: None, state };
+            }
+            SeatEnd::KeysLost => {
+                // This device can no longer follow the group, and the group used to rebuild only
+                // once its last member had left — so one stuck device stranded everyone's media.
+                // Ask for a re-founded one; the server refuses while the call is re-keying
+                // happily, and the retake still repairs this device alone.
+                route.reset_keys().await;
+                attempt = 0;
+                needs_join = true;
+            }
+            SeatEnd::Dropped(reason) => {
+                log::warn!("the call's media session ended: {reason}");
+                attempt = 0;
+                needs_join = true;
+            }
         }
     }
 }

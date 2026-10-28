@@ -63,6 +63,14 @@ pub enum CallEvent {
     TrackEnded { from: String, slot: Slot },
     /// Something worth surfacing; the call goes on.
     Error(String),
+    /// The server ended this seat's media session (a moderator, or a sweep that raced a
+    /// reconnect). The caller asks the roster which, then rejoins or leaves.
+    Removed,
+    /// The media session ended while the seat stands: recoverable by retaking.
+    Dropped(String),
+    /// A peer's media failed to open: on an encrypted call probably a commit behind, so the
+    /// caller asks the encryption group where it stands.
+    KeyTrouble { from: String },
 }
 
 enum Input {
