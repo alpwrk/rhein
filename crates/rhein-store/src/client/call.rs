@@ -701,7 +701,7 @@ impl Client {
                 // ends with the seat; still there, it goes on. A conversation's call follows the
                 // frame.
                 None if !call.conversation => {
-                    let Some(route) = self.route_of(&call) else {
+                    let Some(route) = self.route_of(call) else {
                         self.call = None;
                         self.claim_voice(cx);
                         cx.notify();
@@ -709,12 +709,14 @@ impl Client {
                     };
                     let (io, me, channel) = (self.io.clone(), me.map(str::to_owned).unwrap_or_default(), call.channel_id.clone());
                     cx.spawn(async move |this, cx| {
-                        if !io.spawn(async move { route.seat_held(&me).await }).await.unwrap_or(false) {
+                        // Unreadable is not gone, as in `seat_held`.
+                        if io.spawn(async move { route.seat_held(&me).await }).await.unwrap_or(true) {
                             return;
                         }
                         this.update(cx, |this, cx| {
                             if this.call.as_ref().is_some_and(|c| c.channel_id == channel) {
                                 this.leave_voice(cx);
+                                this.error = Some("You were removed from the voice channel.".into());
                             }
                             cx.notify();
                         })
@@ -1451,6 +1453,7 @@ async fn stand_by(
 }
 
 /// The guards and the dial of one SFU seat: who may join, and the room they join.
+#[allow(clippy::too_many_arguments)]
 async fn dial(
     http: &reqwest::Client,
     endpoint: &str,

@@ -111,7 +111,7 @@ impl GuildKeys {
                 }
                 let founder = d["founder"].as_str() == Some(self.me.as_str());
                 self.group.begin(group_id, founder)?;
-                return Ok(self.key().map_or(Heard::Same, Heard::Keyed));
+                Ok(self.key().map_or(Heard::Same, Heard::Keyed))
             }
             // The committer's look happens through the roster; an announcement naming a group we
             // hold nothing from means we missed the move.
@@ -199,7 +199,7 @@ impl GuildKeys {
     /// Follows the server's commit log. False when the group is not ours or the log has a gap
     /// nothing after it can mend.
     async fn catch_up(&mut self, target: &Standing) -> bool {
-        let since = self.group.is_member().then(|| self.group.epoch().unwrap_or(0)).unwrap_or(0);
+        let since = if self.group.is_member() { self.group.epoch().unwrap_or(0) } else { 0 };
         let Ok(log) = self.api.voice_e2ee_commits(&self.channel, since).await else { return false };
         if log["group_id"].as_str() != Some(target.group_id.as_str()) {
             return false;
