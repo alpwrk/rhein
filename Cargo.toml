@@ -17,6 +17,7 @@ rhein-ui = { path = "crates/rhein-ui" }
 rhein-rpc = { path = "crates/rhein-rpc" }
 rhein-mls = { path = "crates/rhein-mls" }
 rhein-voice = { path = "crates/rhein-voice" }
+rhein-update = { path = "crates/rhein-update" }
 
 anyhow = "1"
 thiserror = "2"

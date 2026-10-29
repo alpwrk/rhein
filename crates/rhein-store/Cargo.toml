@@ -11,6 +11,7 @@ rhein-auth.workspace = true
 rhein-rpc.workspace = true
 rhein-mls.workspace = true
 rhein-voice.workspace = true
+rhein-update.workspace = true
 env_logger.workspace = true
 sha2.workspace = true
 openmls = "0.9"

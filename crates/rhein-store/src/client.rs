@@ -36,6 +36,7 @@ mod movie;
 mod posters;
 mod preload;
 mod sound;
+pub mod update;
 pub use gifs::{GifShare, MediaProbe};
 pub use media::{DownloadView, MediaSource, MediaTick, free_download_path, safe_file_name};
 pub use movie::{MoviePlayer, MovieView};
@@ -356,6 +357,10 @@ pub struct Client {
     pub modal: Option<BotModal>,
     /// Banners closed in this session (by key).
     dismissed_banners: HashSet<String>,
+    /// A newer release of Rhein, from looking for one to installing it.
+    pub update: update::Update,
+    /// Where this copy may install updates; `None` when it can only announce them.
+    update_target: Option<rhein_update::Target>,
     /// The voice channel whose chat column is open (its messages count as read only then).
     voice_chat_open: Option<String>,
     /// Per conversation, our newest message someone else has read.
@@ -513,6 +518,8 @@ impl Client {
             deferred: HashSet::new(),
             modal: None,
             dismissed_banners: HashSet::new(),
+            update: update::Update::Idle,
+            update_target: update::target(),
             read_flush: None,
             account_prefs: serde_json::Value::Object(Default::default()),
             gif_favorites: Vec::new(),
@@ -540,6 +547,9 @@ impl Client {
             mfa_required: false,
         };
         this.restore(cx);
+        if this.prefs.check_updates && rhein_update::enabled() {
+            this.check_for_updates(true, cx);
+        }
         this
     }
 

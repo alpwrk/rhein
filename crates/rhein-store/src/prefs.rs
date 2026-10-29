@@ -45,6 +45,8 @@ pub struct Prefs {
     pub server_dots: bool,
     /// "Copy … ID" entries in menus.
     pub developer_mode: bool,
+    /// Look for a new release of Rhein at startup (it is installed only when asked).
+    pub check_updates: bool,
 }
 
 /// Calls: devices, processing, push-to-talk, the gate, and what stays between calls.
@@ -130,6 +132,7 @@ impl Default for Prefs {
             hide_muted: false,
             server_dots: true,
             developer_mode: true,
+            check_updates: true,
         }
     }
 }
@@ -173,6 +176,7 @@ mod tests {
         assert_eq!(p.recent_emoji, vec!["🎉"]);
         assert_eq!(p.status, "online");
         assert_eq!(p.text_scale, 100);
+        assert!(p.check_updates);
         let round: Prefs = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(round.status, p.status);
     }

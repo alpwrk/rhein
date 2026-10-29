@@ -6,6 +6,7 @@ use gpui::{
     px,
 };
 use rhein_proto::Device;
+use rhein_store::client::update::Update;
 use rhein_store::{Client, ServerStatus, VoicePrefs};
 
 use crate::views::crop::{self, CropDialog, CropEvent};
@@ -1932,7 +1933,34 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn about(&self, t: &Theme) -> AnyElement {
+    fn about(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let client = self.client.read(cx);
+        let check_updates = client.prefs.check_updates;
+        let (status, button) = match &client.update {
+            Update::Idle => ("Updates".to_owned(), Button::new("update-check", "Check now")),
+            Update::Checking => ("Looking for updates…".to_owned(), Button::new("update-check", "Checking…").disabled(true)),
+            Update::UpToDate => ("Rhein is up to date".to_owned(), Button::new("update-check", "Check again")),
+            Update::Failed(err) => (err.clone(), Button::new("update-check", "Try again")),
+            Update::Available(r) if client.can_install(r) => (format!("Rhein {} is out", r.version), Button::new("update-install", "Install").primary()),
+            Update::Available(r) => (format!("Rhein {} is out; update it the way you installed it", r.version), Button::new("update-notes", "What's new")),
+            Update::Installing(r) => (format!("Installing Rhein {}…", r.version), Button::new("update-install", "Installing…").disabled(true)),
+            Update::Installed(r) => (format!("Rhein {} is installed", r.version), Button::new("update-restart", "Restart").primary()),
+        };
+        let c1 = self.client.clone();
+        let button = button
+            .on_click(move |_, _, cx| {
+                c1.update(cx, |c, cx| match &c.update {
+                    Update::Available(r) if c.can_install(r) => c.install_update(cx),
+                    Update::Available(r) => cx.open_url(&r.page_url),
+                    Update::Installed(_) => c.restart_for_update(cx),
+                    _ => c.check_for_updates(false, cx),
+                })
+            })
+            .into_any_element();
+        let c2 = self.client.clone();
+        let startup = Switch::new("check-updates", check_updates)
+            .on_toggle(move |on, _, cx| c2.update(cx, |c, cx| c.update_prefs(cx, |p| p.check_updates = on)))
+            .into_any_element();
         div()
             .flex()
             .flex_col()
@@ -1942,6 +1970,9 @@ impl SettingsView {
             .child(format!("Version {} – a native client for Telium, written in Rust with GPUI.", env!("CARGO_PKG_VERSION")))
             .child("Licensed under the Apache License 2.0.")
             .child("Bundled: Geist and Geist Mono (SIL Open Font License 1.1), Lucide icons (ISC licence), Unicode emoji data via the emojis crate.")
+            .child(heading("updates", t))
+            .child(setting_row_owned(t, status, "New releases come from GitHub and are checked against Rhein's release key. Nothing is installed until you say so, and your settings and data stay as they are.", button))
+            .child(setting_row(t, "Look for updates at startup", "Shows a notice when a new version is out.", startup))
             .into_any_element()
     }
 }
@@ -2092,7 +2123,7 @@ impl Render for SettingsView {
             Section::Encryption => self.encryption_section(&t, cx),
             Section::Voice => self.voice_section(&t, cx),
             Section::Shortcuts => self.shortcuts(&t),
-            Section::About => self.about(&t),
+            Section::About => self.about(&t, cx),
         };
         // A new crop dialog takes the keyboard, so Escape closes it rather than the settings.
         if let Some((dialog, _)) = &self.crop

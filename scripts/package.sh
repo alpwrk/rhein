@@ -7,6 +7,10 @@
 # ~/.local (or /usr with --system). The binary needs the system libraries a Rhein build needs at run
 # time (ALSA, Vulkan, xkbcommon, fontconfig, PipeWire and the desktop portal for screen sharing),
 # and a glibc at least as new as the one it was built on. The release workflow runs this.
+#
+# With RHEIN_SIGNING_KEY set (the release key as a PEM), the tarball is also signed into a .sig
+# beside it: a raw Ed25519 signature over the whole file, which the in-app updater checks against
+# the public key in crates/rhein-update before it installs anything.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -44,4 +48,12 @@ INSTALL
 chmod +x "$stage/install.sh"
 tar -czf "dist/$name.tar.gz" -C dist "$name"
 (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+if [[ -n ${RHEIN_SIGNING_KEY:-} ]]; then
+  key="$(mktemp)"
+  trap 'rm -f "$key"' EXIT
+  printf '%s\n' "$RHEIN_SIGNING_KEY" > "$key"
+  openssl pkeyutl -sign -rawin -inkey "$key" -in "dist/$name.tar.gz" -out "dist/$name.tar.gz.sig"
+  [[ $(stat -c %s "dist/$name.tar.gz.sig") == 64 ]] || { echo "the signature is not 64 bytes" >&2; exit 1; }
+  echo "· signed dist/$name.tar.gz.sig"
+fi
 echo "· packed dist/$name.tar.gz ($(du -h "dist/$name.tar.gz" | cut -f1))"

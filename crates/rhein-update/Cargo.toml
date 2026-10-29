@@ -1,0 +1,21 @@
+[package]
+name = "rhein-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Finds, verifies and installs new Rhein releases from GitHub"
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+ed25519-dalek.workspace = true
+flate2 = "1"
+log.workspace = true
+reqwest.workspace = true
+semver = "1"
+serde_json.workspace = true
+tar = "0.4"
+
+[dev-dependencies]
+rand.workspace = true
+tempfile = "3"

@@ -39,7 +39,12 @@ jobs:
       - name: Build
         run: ./install --build-only --no-deps
       - name: Pack
-        run: scripts/package.sh "$GITHUB_REF_NAME"
+        # Signed for the in-app updater, which installs nothing without a valid signature.
+        env:
+          RHEIN_SIGNING_KEY: ${{ secrets.RHEIN_SIGNING_KEY }}
+        run: |
+          [[ -n $RHEIN_SIGNING_KEY ]] || { echo "the RHEIN_SIGNING_KEY secret is missing" >&2; exit 1; }
+          scripts/package.sh "$GITHUB_REF_NAME"
       - uses: softprops/action-gh-release@v2
         with:
           name: Rhein ${{ github.ref_name }}
@@ -47,4 +52,5 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/*.tar.gz.sig
           body_path: dist/notes.md

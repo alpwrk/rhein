@@ -12,6 +12,11 @@ use super::{Client, ServerStatus};
 pub enum BannerAction {
     /// Cancels a scheduled move (`POST /migrate/{id}/cancel`), possible until it runs.
     CancelMove(String),
+    /// Downloads and installs the release found (`Client::update`).
+    InstallUpdate,
+    /// Starts the installed update in place of this copy.
+    RestartForUpdate,
+    OpenUrl(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -131,6 +136,7 @@ impl Client {
                 out.push(Banner { key: format!("protocol:{}", server.name), text: format!("Can't connect to {}: {reason}. Update Rhein.", server.name), urgent: true, action: None });
             }
         }
+        out.extend(self.update_banner());
         out.retain(|b| !self.dismissed_banners.contains(&b.key));
         out
     }
@@ -142,6 +148,9 @@ impl Client {
 
     pub fn banner_action(&mut self, action: BannerAction, cx: &mut Context<Self>) {
         match action {
+            BannerAction::InstallUpdate => self.install_update(cx),
+            BannerAction::RestartForUpdate => self.restart_for_update(cx),
+            BannerAction::OpenUrl(url) => cx.open_url(&url),
             BannerAction::CancelMove(id) => {
                 let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
                 let io = self.io.clone();

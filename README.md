@@ -33,6 +33,8 @@ Rhein runs on Linux, on Wayland and X11. It is developed on Arch Linux.
 
 The [releases](https://github.com/alpwrk/rhein/releases) have a build for x86_64. Unpack it and run `./install.sh` to install it for yourself (into `~/.local`), or `./install.sh --system` for everyone. It needs glibc 2.35 or newer, ALSA, PipeWire and a Vulkan driver.
 
+Rhein looks for a new release when it starts and shows a notice with an Install button; nothing is installed until you click it, and your settings and data stay as they are. Each release is signed, and Rhein checks the signature against the key built into it before replacing anything. A copy under `/usr`, or in a directory you can't write to, only tells you a new version is out. You can turn the check off, or look for an update yourself, under Settings → About.
+
 ### From source
 
 Building Rhein needs a Rust toolchain recent enough for edition 2024 (Rust 1.85 or later), and the first build takes a while because it compiles libwebrtc.
