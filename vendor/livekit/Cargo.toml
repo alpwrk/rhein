@@ -52,3 +52,7 @@ chrono = "0.4.38"
 libloading = "0.8.6"
 bytes = "1.10.1"
 bmrng = "0.5.2"
+
+# Upstream's warnings aren't ours to fix; shown, they only clutter `./install` (see RHEIN.md).
+[lints.rust]
+warnings = "allow"

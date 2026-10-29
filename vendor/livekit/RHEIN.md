@@ -14,3 +14,6 @@ Changes:
 - Workspace-inherited manifest fields are written out, the sibling crates come
   from the same git rev, and the dev-dependencies are dropped (a dependency's
   tests are never built).
+- Lints are allowed in the manifest (`[lints.rust] warnings = "allow"`). A path dependency's
+  warnings are printed like our own; upstream's are not ours to fix and only clutter
+  `./install`.
