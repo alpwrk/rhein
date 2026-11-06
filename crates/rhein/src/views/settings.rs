@@ -2111,11 +2111,12 @@ impl Render for SettingsView {
         nav = nav.child(div().px_2().pb_1().font_family(rhein_ui::theme::FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("settings"));
         for section in Section::ALL {
             if let Some(heading) = section.group_heading() {
+                // A thin rule above every group, the first one included (it sits under "settings").
+                nav = nav.child(div().h(px(1.)).flex_none().mx_2().my_1().bg(t.border));
                 nav = nav.child(
                     div()
                         .px_2()
-                        .when(section == Section::Account, |d| d.pt_0())
-                        .when(section != Section::Account, |d| d.pt_2())
+                        .pt_1()
                         .pb_0p5()
                         .font_family(rhein_ui::theme::FONT_MONO)
                         .text_size(text::XS)
