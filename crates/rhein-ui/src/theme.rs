@@ -65,7 +65,7 @@ impl Theme {
 
             text: rgb(0xededed),
             text_muted: rgb(0xa1a1a1),
-            text_faint: rgb(0x666666),
+            text_faint: rgb(0x858585),
             text_on_accent: rgb(0x000000),
 
             accent: rgb(0xededed),
@@ -73,7 +73,7 @@ impl Theme {
             accent_soft: rgba(0xffffff14),
             link: rgb(0x6cb2ff),
             link_hover: rgb(0xb3d7ff),
-            danger: rgb(0xee4444),
+            danger: rgb(0xf06060),
             danger_soft: rgba(0xee444426),
             success: rgb(0x3ecf8e),
             warning: rgb(0xf5a524),
@@ -99,18 +99,18 @@ impl Theme {
 
             text: rgb(0x171717),
             text_muted: rgb(0x5c5c5c),
-            text_faint: rgb(0x8f8f8f),
+            text_faint: rgb(0x6a6a6a),
             text_on_accent: rgb(0xffffff),
 
             accent: rgb(0x171717),
             accent_hover: rgb(0x000000),
             accent_soft: rgba(0x0000000f),
-            link: rgb(0x0068d6),
+            link: rgb(0x0060c7),
             link_hover: rgb(0x00418a),
-            danger: rgb(0xdc2626),
+            danger: rgb(0xc81e1e),
             danger_soft: rgba(0xdc26261f),
-            success: rgb(0x16a34a),
-            warning: rgb(0xc27803),
+            success: rgb(0x15803d),
+            warning: rgb(0x9a5b00),
             live: rgb(0x7c3aed),
 
             selection: rgba(0x0068d62e),
