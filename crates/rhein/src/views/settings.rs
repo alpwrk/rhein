@@ -2108,14 +2108,15 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let mut nav = div().w(px(220.)).flex_none().flex().flex_col().gap_0p5().p_3().bg(t.bg_panel);
-        nav = nav.child(div().px_2().pb_2().font_family(rhein_ui::theme::FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("settings"));
+        nav = nav.child(div().px_2().pb_1().font_family(rhein_ui::theme::FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("settings"));
         for section in Section::ALL {
             if let Some(heading) = section.group_heading() {
                 nav = nav.child(
                     div()
                         .px_2()
-                        .pt_3()
-                        .pb_1()
+                        .when(section == Section::Account, |d| d.pt_0())
+                        .when(section != Section::Account, |d| d.pt_2())
+                        .pb_0p5()
                         .font_family(rhein_ui::theme::FONT_MONO)
                         .text_size(text::XS)
                         .text_color(t.text_faint)
