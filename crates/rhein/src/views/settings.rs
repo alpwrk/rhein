@@ -34,21 +34,24 @@ enum Section {
 }
 
 impl Section {
+    /// Grouped for the sidebar: who you are and how it is protected, then how the app behaves,
+    /// then the rest. `GROUP_STARTS` marks where a gap goes.
     const ALL: [Section; 13] = [
         Section::Account,
+        Section::Security,
+        Section::Privacy,
         Section::Devices,
-        Section::Servers,
+        Section::Encryption,
         Section::Appearance,
         Section::Notifications,
-        Section::Privacy,
-        Section::Security,
-        Section::Extras,
-        Section::Activity,
-        Section::Encryption,
         Section::Voice,
         Section::Shortcuts,
+        Section::Servers,
+        Section::Activity,
+        Section::Extras,
         Section::About,
     ];
+    const GROUP_STARTS: [Section; 2] = [Section::Appearance, Section::Servers];
 
     fn label(self) -> &'static str {
         match self {
@@ -2098,6 +2101,9 @@ impl Render for SettingsView {
         let mut nav = div().w(px(220.)).flex_none().flex().flex_col().gap_0p5().p_3().bg(t.bg_panel);
         nav = nav.child(div().px_2().pb_2().font_family(rhein_ui::theme::FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("settings"));
         for section in Section::ALL {
+            if Section::GROUP_STARTS.contains(&section) {
+                nav = nav.child(div().h(px(8.)).flex_none());
+            }
             nav = nav.child(
                 ListRow::new(SharedString::from(format!("settings-{}", section.label())), section.label())
                     .icon(section.icon())
