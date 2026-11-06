@@ -117,7 +117,7 @@ impl RenderOnce for Button {
         };
         let disabled = self.disabled;
         let id = self.id.clone();
-        let ring = t.link;
+        let ring = t.accent;
         let el = div()
             .id(self.id)
             .h(if self.small { size::CONTROL_SM } else { size::CONTROL })
@@ -216,7 +216,7 @@ impl RenderOnce for IconButton {
         let hover_color = if self.danger || self.active { color } else { t.text };
         let id = self.id.clone();
         let clear: gpui::Rgba = gpui::transparent_black().into();
-        let ring = t.link;
+        let ring = t.accent;
         let el = div()
             .id(self.id)
             .size(if self.large { size::ICON_BUTTON_LG } else { size::ICON_BUTTON })

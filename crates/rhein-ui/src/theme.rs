@@ -176,9 +176,9 @@ pub mod size {
 
 pub mod radius {
     use super::*;
-    pub const SM: Pixels = px(4.);
-    pub const MD: Pixels = px(6.);
-    pub const LG: Pixels = px(8.);
+    pub const SM: Pixels = px(6.);
+    pub const MD: Pixels = px(8.);
+    pub const LG: Pixels = px(12.);
 }
 
 pub const FONT_UI: &str = "Geist";

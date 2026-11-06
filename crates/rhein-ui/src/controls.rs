@@ -42,7 +42,7 @@ impl Tabs {
 impl RenderOnce for Tabs {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = cx.theme();
-        let ring = t.link;
+        let ring = t.accent;
         div().flex().gap_1().children(self.labels.into_iter().enumerate().map(|(i, label)| {
             let active = i == self.selected;
             let handler = self.on_select.clone();
@@ -85,7 +85,7 @@ impl RenderOnce for Switch {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = cx.theme();
         let on = self.on;
-        let ring = t.link;
+        let ring = t.accent;
         div()
             .id(self.id)
             .tab_index(0)
@@ -213,7 +213,7 @@ impl RenderOnce for ListRow {
         let id = self.id.clone();
         let clear: gpui::Rgba = gpui::transparent_black().into();
         let rest = crate::hover::Paint { bg: if self.selected { t.bg_selected } else { clear }, text: color };
-        let ring = t.link;
+        let ring = t.accent;
         let row = div()
             .id(self.id)
             .h(px(if two_lines { 42. } else { 32. }))
