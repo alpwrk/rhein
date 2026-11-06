@@ -122,3 +122,14 @@ pub fn hover_fade_with(el: gpui::Stateful<gpui::Div>, id: &ElementId, rest: Pain
         });
     (el, now)
 }
+
+/// The keyboard focus ring: a 2px halo outside the element, so showing it moves nothing.
+pub fn focus_ring(s: gpui::StyleRefinement, color: Rgba) -> gpui::StyleRefinement {
+    s.shadow(vec![gpui::BoxShadow {
+        color: color.into(),
+        offset: gpui::point(gpui::px(0.), gpui::px(0.)),
+        blur_radius: gpui::px(0.),
+        spread_radius: gpui::px(2.),
+        inset: false,
+    }])
+}

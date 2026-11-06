@@ -3047,6 +3047,7 @@ impl Shell {
         let this = cx.weak_entity();
         Some(
             Modal::new("add-dialog")
+                .focus(&self.modal_focus)
                 .on_dismiss(move |window, cx| {
                     this.update(cx, |v, cx| v.close_dialog(window, cx)).ok();
                 })

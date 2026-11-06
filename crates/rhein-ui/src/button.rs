@@ -133,7 +133,7 @@ impl RenderOnce for Button {
             .font_weight(FontWeight::MEDIUM)
             .when(self.full_width, |d| d.w_full())
             .when(disabled, |d| d.opacity(0.5).bg(bg).text_color(fg))
-            .when(!disabled, |d| d.cursor_pointer().tab_index(0).focus_visible(|s| s.border_2().border_color(ring)));
+            .when(!disabled, |d| d.cursor_pointer().tab_index(0).focus_visible(|s| crate::hover::focus_ring(s, ring)));
         let el = if disabled {
             el
         } else {
@@ -226,7 +226,7 @@ impl RenderOnce for IconButton {
             .justify_center()
             .rounded(radius::MD)
             .cursor_pointer()
-            .when(!self.disabled, |d| d.tab_index(0).focus_visible(|s| s.border_2().border_color(ring)));
+            .when(!self.disabled, |d| d.tab_index(0).focus_visible(|s| crate::hover::focus_ring(s, ring)));
         let (rest, lit, held) = (
             Paint { bg: clear, text: color },
             Paint { bg: t.bg_hover, text: hover_color },

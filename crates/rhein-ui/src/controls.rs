@@ -42,6 +42,7 @@ impl Tabs {
 impl RenderOnce for Tabs {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = cx.theme();
+        let ring = t.link;
         div().flex().gap_1().children(self.labels.into_iter().enumerate().map(|(i, label)| {
             let active = i == self.selected;
             let handler = self.on_select.clone();
@@ -52,6 +53,8 @@ impl RenderOnce for Tabs {
                 .rounded(radius::MD)
                 .text_size(text::MD)
                 .cursor_pointer()
+                .tab_index(0)
+                .focus_visible(|s| crate::hover::focus_ring(s, ring))
                 .when(active, |d| d.bg(t.bg_selected).text_color(t.text))
                 .when(!active, |d| d.text_color(t.text_muted).hover(|s| s.text_color(t.text)))
                 .when_some(handler, |d, h| d.on_click(move |_, window, cx| h(i, window, cx)))
@@ -82,8 +85,11 @@ impl RenderOnce for Switch {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = cx.theme();
         let on = self.on;
+        let ring = t.link;
         div()
             .id(self.id)
+            .tab_index(0)
+            .focus_visible(|s| crate::hover::focus_ring(s, ring))
             .w(px(34.))
             .h(px(20.))
             .flex_none()
@@ -207,6 +213,7 @@ impl RenderOnce for ListRow {
         let id = self.id.clone();
         let clear: gpui::Rgba = gpui::transparent_black().into();
         let rest = crate::hover::Paint { bg: if self.selected { t.bg_selected } else { clear }, text: color };
+        let ring = t.link;
         let row = div()
             .id(self.id)
             .h(px(if two_lines { 42. } else { 32. }))
@@ -218,7 +225,7 @@ impl RenderOnce for ListRow {
             .text_size(text::MD)
             .when(self.strong, |d| d.font_weight(FontWeight::SEMIBOLD))
             .when(self.muted, |d| d.opacity(0.5))
-            .when(clickable, |d| d.cursor_pointer());
+            .when(clickable, |d| d.cursor_pointer().tab_index(0).focus_visible(|s| crate::hover::focus_ring(s, ring)));
         // Clickable rows ease into their hover and press tints; a selected one stays selected.
         let row = if clickable && !self.selected {
             let lit = crate::hover::Paint { bg: t.bg_hover, text: t.text };
