@@ -92,6 +92,9 @@ pub struct RowUi {
     pub progress: Option<u64>,
     pub scale_factor: f32,
     pub movie_big: bool,
+    /// The list is too narrow to keep `ACTION_BAR_W` free beside every message (a thread panel,
+    /// a small window): the text gets the room and the hover bar lies over the row's edge.
+    pub narrow: bool,
 }
 
 /// One message row of the history as a view of its own, drawn cached at the size it last had
@@ -547,7 +550,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, ui: &RowUi, _window: &mut Window, cx:
             d.hover(move |s| s.bg(lit))
         })
         .children(reply_quote)
-        .child(div().flex().gap_3().pr(px(ACTION_BAR_W)).child(gutter).child(body))
+        .child(div().flex().gap_3().pr(px(if ui.narrow { 0. } else { ACTION_BAR_W })).child(gutter).child(body))
         .children(actions)
         .when(!pending, |d| {
             // The message is looked up on the click, not cloned into every row of every frame.

@@ -832,6 +832,10 @@ impl ChatView {
                 progress: self.row_progress.get(&key).copied(),
                 scale_factor: ctx.scale_factor,
                 movie_big: ctx.movie_big,
+                narrow: {
+                    let width = self.list.viewport_bounds().size.width;
+                    width > px(0.) && width < px(520.)
+                },
             };
             (key, ui)
         };
