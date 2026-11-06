@@ -117,6 +117,7 @@ impl RenderOnce for Button {
         };
         let disabled = self.disabled;
         let id = self.id.clone();
+        let ring = t.link;
         let el = div()
             .id(self.id)
             .h(if self.small { size::CONTROL_SM } else { size::CONTROL })
@@ -132,7 +133,7 @@ impl RenderOnce for Button {
             .font_weight(FontWeight::MEDIUM)
             .when(self.full_width, |d| d.w_full())
             .when(disabled, |d| d.opacity(0.5).bg(bg).text_color(fg))
-            .when(!disabled, |d| d.cursor_pointer());
+            .when(!disabled, |d| d.cursor_pointer().tab_index(0).focus_visible(|s| s.border_2().border_color(ring)));
         let el = if disabled {
             el
         } else {
@@ -215,6 +216,7 @@ impl RenderOnce for IconButton {
         let hover_color = if self.danger || self.active { color } else { t.text };
         let id = self.id.clone();
         let clear: gpui::Rgba = gpui::transparent_black().into();
+        let ring = t.link;
         let el = div()
             .id(self.id)
             .size(if self.large { size::ICON_BUTTON_LG } else { size::ICON_BUTTON })
@@ -223,7 +225,8 @@ impl RenderOnce for IconButton {
             .items_center()
             .justify_center()
             .rounded(radius::MD)
-            .cursor_pointer();
+            .cursor_pointer()
+            .when(!self.disabled, |d| d.tab_index(0).focus_visible(|s| s.border_2().border_color(ring)));
         let (rest, lit, held) = (
             Paint { bg: clear, text: color },
             Paint { bg: t.bg_hover, text: hover_color },
