@@ -2191,7 +2191,7 @@ impl ChatView {
                     StagedState::Uploading => ("Uploading…".to_owned(), t.text_faint),
                     StagedState::Ready(_) => (format_size(s.size as i64), t.text_faint),
                     StagedState::Local(_) => (format!("{} · encrypted when sent", format_size(s.size as i64)), t.text_faint),
-                    StagedState::Failed(err) => (format!("Failed: {err}"), t.danger),
+                    StagedState::Failed(err) => (format!("Upload failed: {err}. Check your connection and try again."), t.danger),
                 };
                 let thumb: Option<gpui::AnyElement> = match (&s.preview, &s.state) {
                     (Some(image), _) => Some(img(rhein_ui::images::local(image.clone(), px(40.), window)).size(px(40.)).rounded(radius::SM).object_fit(ObjectFit::Cover).into_any_element()),
@@ -2600,7 +2600,7 @@ impl Render for ChatView {
         let top_note = if loading {
             Some("Loading messages…".to_owned())
         } else if let Some(err) = history_error {
-            Some(format!("Couldn't load history: {err}"))
+            Some(format!("Couldn't load history: {err}. Check your connection and try again."))
         } else if reached_start && is_dm {
             Some(format!("This is the start of your encrypted conversation with {name}."))
         } else if reached_start {

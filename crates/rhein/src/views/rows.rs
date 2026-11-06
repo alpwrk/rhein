@@ -1032,7 +1032,7 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
                         .justify_center()
                         .text_size(text::SM)
                         .text_color(faint)
-                        .child(format!("Couldn't load {fallback_name}"))
+                        .child(format!("Couldn't load {fallback_name}. Check your connection and try again."))
                         .into_any_element()
                 }),
         )
@@ -1614,7 +1614,7 @@ fn invite_card(ctx: &RowCtx, ix: usize, url: &str, t: &Theme) -> AnyElement {
                 .child(div().text_size(text::SM).text_color(t.text_faint).child("You've been invited to a guild"))
                 .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(format!("{server} · {code}"))),
         )
-        .child(Button::new(SharedString::from(format!("invite-join-{ix}")), "Join").primary().on_click(move |_, _, cx| {
+        .child(Button::new(SharedString::from(format!("invite-join-{ix}")), "Join guild").primary().on_click(move |_, _, cx| {
             let invite = invite.clone();
             client.update(cx, |c, cx| c.join_invite(invite, None, cx));
         }))

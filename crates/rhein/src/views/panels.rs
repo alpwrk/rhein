@@ -284,7 +284,7 @@ impl Render for ThreadsPanel {
                         .border_t_1()
                         .border_color(t.border)
                         .child(div().flex_1().child(self.title.clone()))
-                        .child(Button::new("thread-create", "Start").primary().on_click(cx.listener(|this, _, _, cx| this.create(cx)))),
+                        .child(Button::new("thread-create", "Start thread").primary().on_click(cx.listener(|this, _, _, cx| this.create(cx)))),
                 )
             })
     }
@@ -402,7 +402,7 @@ impl Render for SearchPanel {
                 results = results.child(div().px_1().text_size(text::XS).text_color(t.text_faint).child(if s.loading && s.results.is_empty() {
                     "Searching…".to_owned()
                 } else if let Some(err) = &s.error {
-                    format!("Search failed: {err}")
+                    format!("Search failed: {err}. Check your connection and try again.")
                 } else {
                     format!("{} result{}", s.total, if s.total == 1 { "" } else { "s" })
                 }));

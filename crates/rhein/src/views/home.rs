@@ -291,7 +291,7 @@ impl HomeView {
                             .flex()
                             .gap_2()
                             .child(div().flex_1().child(self.group.clone()))
-                            .child(div().w(px(FORM_BUTTON_W)).flex_none().flex().child(Button::new("group-start", "Start").icon(Icon::Lock).full_width().on_click(cx.listener(|v, _, _, cx| v.start_group(cx))))),
+                            .child(div().w(px(FORM_BUTTON_W)).flex_none().flex().child(Button::new("group-start", "Start group").icon(Icon::Lock).full_width().on_click(cx.listener(|v, _, _, cx| v.start_group(cx))))),
                     ),
             )
             .child(rhein_ui::smooth_scroll("friends-glide", rhein_ui::ScrollTarget::Handle(self.list_scroll.clone()), list))

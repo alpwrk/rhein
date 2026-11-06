@@ -144,7 +144,7 @@ impl Render for LoginView {
                             )
                             .child(
                                 div().text_size(text::XXL).font_weight(FontWeight::SEMIBOLD).child(if register {
-                                    "Create an account"
+                                    "Create account"
                                 } else {
                                     "Welcome back"
                                 }),
@@ -164,7 +164,8 @@ impl Render for LoginView {
                         Button::new(
                             "login-submit",
                             match (busy, register) {
-                                (true, _) => "One moment…",
+                                (true, true) => "Creating account…",
+                                (true, false) => "Signing in…",
                                 (false, true) => "Create account",
                                 (false, false) => "Sign in",
                             },
