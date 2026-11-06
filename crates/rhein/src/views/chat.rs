@@ -832,10 +832,7 @@ impl ChatView {
                 progress: self.row_progress.get(&key).copied(),
                 scale_factor: ctx.scale_factor,
                 movie_big: ctx.movie_big,
-                narrow: {
-                    let width = self.list.viewport_bounds().size.width;
-                    width > px(0.) && width < px(520.)
-                },
+                narrow: ctx.narrow,
             };
             (key, ui)
         };
@@ -2074,6 +2071,11 @@ impl ChatView {
             movie: self.movie.clone(),
             movie_big: self.movie_big,
             divider: self.client.read(cx).divider_index(&channel_id),
+            // Read here, before the list lays out: inside its row callback the list is borrowed.
+            narrow: {
+                let width = self.list.viewport_bounds().size.width;
+                width > px(0.) && width < px(520.)
+            },
         });
         // Each row is a view of its own, drawn cached at the size it last had: a scroll moves the
         // rows without drawing them again, and a hover or a picture arriving draws only its row.

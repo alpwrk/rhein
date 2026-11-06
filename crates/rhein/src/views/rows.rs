@@ -65,6 +65,8 @@ pub struct RowCtx {
     pub movie_big: bool,
     /// Where the "New messages" line goes (`Client::divider_index`), found once per frame.
     pub divider: Option<usize>,
+    /// The list is narrower than `ACTION_BAR_W` can be spared in (see `RowUi::narrow`).
+    pub narrow: bool,
 }
 
 /// What a row shows of the chat view's own state (not the client's): worked out by the chat
