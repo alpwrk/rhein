@@ -2146,7 +2146,7 @@ impl ChatView {
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .text_size(text::XS)
+                .text_size(text::SM)
                 .text_color(t.text_muted)
                 .child(self.dots.clone().cached(gpui::StyleRefinement::default().w(px(21.)).h(px(5.))))
                 .child(label)
@@ -2227,7 +2227,7 @@ impl ChatView {
                             .flex_col()
                             .max_w(px(180.))
                             .child(div().text_size(text::SM).truncate().child(s.name.clone()))
-                            .child(div().text_size(text::XS).text_color(color).truncate().child(status)),
+                            .child(div().text_size(text::SM).text_color(color).truncate().child(status)),
                     )
                     .child(
                         IconButton::new(SharedString::from(format!("unstage-{}", s.id)), Icon::X)
@@ -2320,7 +2320,7 @@ impl ChatView {
                                 .border_1()
                                 .border_color(t.text_faint)
                                 .text_color(t.text_muted)
-                                .text_size(text::XS)
+                                .text_size(text::SM)
                                 .font_weight(FontWeight::BOLD)
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(t.text).border_color(t.text_muted))

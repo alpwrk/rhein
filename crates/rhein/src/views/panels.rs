@@ -366,12 +366,12 @@ impl Render for SearchPanel {
         let filter = |id: &'static str, label: String, active: bool, cx: &mut Context<Self>, f: fn(&mut Self)| {
             div()
                 .id(id)
+                .h(rhein_ui::theme::size::CONTROL_SM)
                 .px_2()
-                .py_0p5()
                 .rounded(radius::MD)
                 .border_1()
                 .border_color(if active { t.accent } else { t.border_strong })
-                .text_size(text::XS)
+                .text_size(text::SM)
                 .text_color(if active { t.accent } else { t.text_muted })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {

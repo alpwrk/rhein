@@ -1611,7 +1611,7 @@ fn invite_card(ctx: &RowCtx, ix: usize, url: &str, t: &Theme) -> AnyElement {
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(div().text_size(text::XS).text_color(t.text_faint).child("You've been invited to a guild"))
+                .child(div().text_size(text::SM).text_color(t.text_faint).child("You've been invited to a guild"))
                 .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(format!("{server} · {code}"))),
         )
         .child(Button::new(SharedString::from(format!("invite-join-{ix}")), "Join").primary().on_click(move |_, _, cx| {
