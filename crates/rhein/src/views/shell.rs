@@ -1853,26 +1853,35 @@ impl Shell {
                 }),
             )
         };
-        // Bottom right: the whole profile.
+        // Right beside the card, level with its top: the whole profile. Outside the card so it covers nothing.
         let expand = {
             let (v, u, g) = (cx.weak_entity(), user_id.clone(), guild_id.clone());
-            div().absolute().bottom_2().right_2().child(IconButton::new("profile-expand", Icon::Maximize).tooltip("View full profile").on_click(move |_, _, cx| {
-                let (u, g) = (u.clone(), g.clone());
-                v.update(cx, |v, cx| v.open_full_profile(u, g, 0, cx)).ok();
-            }))
+            div().flex().items_start().child(
+                div().ml_1().rounded(radius::MD).bg(t.bg_panel).border_1().border_color(t.border_strong).shadow_lg().child(
+                    IconButton::new("profile-expand", Icon::Maximize).tooltip("View full profile").on_click(move |_, _, cx| {
+                        let (u, g) = (u.clone(), g.clone());
+                        v.update(cx, |v, cx| v.open_full_profile(u, g, 0, cx)).ok();
+                    }),
+                ),
+            )
         };
-        let card = profile::frame(&look, &t, div().flex().flex_col().child(profile::header(&look, face, &t)).child(body))
-            .relative()
-            .child(more)
-            .child(expand)
+        let card = div()
+            .flex()
+            .items_start()
             .occlude()
-            .shadow_lg()
             .on_mouse_down_out(cx.listener(|v, _, _, cx| {
                 if let Some((user, _, _)) = v.profile_card.take() {
                     v.card_closed = Some((user, std::time::Instant::now()));
                 }
                 cx.notify();
-            }));
+            }))
+            .child(
+                profile::frame(&look, &t, div().flex().flex_col().child(profile::header(&look, face, &t)).child(body))
+                    .relative()
+                    .child(more)
+                    .shadow_lg(),
+            )
+            .child(expand);
         // Over the whole window, behind the card: whatever is under it neither scrolls nor
         // answers the pointer while the card is open (a click outside only closes the card).
         let backdrop = div().id("profile-card-backdrop").absolute().inset_0().occlude().on_scroll(|_, _, cx| cx.stop_propagation());
