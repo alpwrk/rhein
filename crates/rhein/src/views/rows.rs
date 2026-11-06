@@ -24,10 +24,10 @@ use crate::views::media::{self, Media};
 use crate::views::message_text;
 
 /// Room above and below every row's content, inside its background.
-const ROW_PAD: Pixels = px(2.);
+const ROW_PAD: Pixels = px(3.);
 /// Space between groups of messages, outside the rows.
-const GROUP_GAP: Pixels = px(14.);
-const GROUP_GAP_COMPACT: Pixels = px(6.);
+const GROUP_GAP: Pixels = px(18.);
+const GROUP_GAP_COMPACT: Pixels = px(8.);
 /// How much closer a message's text sits under its header than the body's gap (`gap_1`).
 const HEADER_TEXT_PULL: Pixels = px(2.);
 /// The line height of a group's header, shared by the name and the time.
@@ -547,7 +547,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, ui: &RowUi, _window: &mut Window, cx:
             d.hover(move |s| s.bg(lit))
         })
         .children(reply_quote)
-        .child(div().flex().gap_4().pr(px(ACTION_BAR_W)).child(gutter).child(body))
+        .child(div().flex().gap_3().pr(px(ACTION_BAR_W)).child(gutter).child(body))
         .children(actions)
         .when(!pending, |d| {
             // The message is looked up on the click, not cloned into every row of every frame.

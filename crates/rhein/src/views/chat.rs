@@ -45,7 +45,7 @@ const COMPOSER_TOP: Pixels = px(8.);
 /// `TYPING_H + 2 × TYPING_GAP − COMPOSER_TOP` (pixel arithmetic isn't const).
 const HISTORY_BOTTOM: Pixels = px(16. + 2. * 2. - 8.);
 /// Space between the message bar and the chat's bottom, left and right edges.
-const COMPOSER_MARGIN: Pixels = px(6.);
+const COMPOSER_MARGIN: Pixels = px(12.);
 
 pub fn bindings() -> Vec<KeyBinding> {
     vec![KeyBinding::new("escape", Dismiss, Some(LIGHTBOX_CONTEXT))]
@@ -2253,8 +2253,8 @@ impl ChatView {
             // where we may not write, a closed bar saying so.
             .child(if locked {
                 div()
-                    .h(px(46.))
-                    .px_3()
+                    .h(px(48.))
+                    .px_4()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -2275,15 +2275,15 @@ impl ChatView {
                     .flex()
                     .items_start()
                     .gap_1()
-                    .pl_1()
-                    .pr(px(4.))
-                    .py(px(4.))
+                    .pl_2()
+                    .pr(px(6.))
+                    .py(px(6.))
                     // Where the box is, for the pickers to open just above it.
                     .child({
                         let bounds = self.composer_bounds.clone();
                         gpui::canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().size_full()
                     })
-                    .rounded(radius::MD)
+                    .rounded(radius::LG)
                     .bg(t.bg_raised)
                     .border_1()
                     .border_color(if focused { t.text_faint } else { t.border_strong })

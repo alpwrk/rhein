@@ -2254,7 +2254,7 @@ impl Shell {
         let home = client.showing_home;
         let selected = client.selected_guild.clone();
 
-        let mut tree = div().id("sidebar-tree").flex_1().overflow_y_scroll().track_scroll(&self.tree_scroll).px_2().pb_2().flex().flex_col();
+        let mut tree = div().id("sidebar-tree").flex_1().overflow_y_scroll().track_scroll(&self.tree_scroll).px_2().pt_1().pb_3().flex().flex_col();
 
         // Direct messages: the row sits in a strip as tall as the chat header, so both share one
         // line underneath; its conversations open below it.
@@ -2296,8 +2296,8 @@ impl Shell {
             tree = tree.child(
                 div()
                     .px_2()
-                    .pt_4()
-                    .pb_1()
+                    .pt_5()
+                    .pb_1p5()
                     .flex()
                     .items_center()
                     .gap_1p5()
@@ -2356,13 +2356,13 @@ impl Shell {
                     div()
                         .id(SharedString::from(format!("tree-guild-{gid}")))
                         .group("guild-row")
-                        .h(px(30.))
+                        .h(px(32.))
                         .pl_1()
-                        .pr_1()
+                        .pr_2()
                         .rounded(radius::MD)
                         .flex()
                         .items_center()
-                        .gap_1()
+                        .gap_1p5()
                         .cursor_pointer()
                         .text_color(if active || unread { t.text } else { t.text_muted })
                         .when(unread, |d| d.font_weight(FontWeight::SEMIBOLD))
@@ -2391,7 +2391,7 @@ impl Shell {
                         .child(
                             div()
                                 .id(SharedString::from(format!("tree-chevron-{gid}")))
-                                .size(px(20.))
+                                .size(px(24.))
                                 .flex_none()
                                 .flex()
                                 .items_center()
@@ -2412,7 +2412,7 @@ impl Shell {
                         .child(
                             div()
                                 .relative()
-                                .size(px(20.))
+                                .size(px(24.))
                                 .flex_none()
                                 .when(unread && mentions == 0 && !expanded, |d| {
                                     d.child(
@@ -2433,7 +2433,7 @@ impl Shell {
                                 .inset_0()
                                 .invisible()
                                 .group_hover("guild-row", |s| s.visible())
-                                .size(px(20.))
+                                .size(px(24.))
                                 .flex_none()
                                 .flex()
                                 .items_center()
@@ -2458,7 +2458,7 @@ impl Shell {
         }
 
         tree = tree.child(
-            div().mt_2().pt_2().border_t_1().border_color(t.border).child(
+            div().mt_3().pt_3().border_t_1().border_color(t.border).child(
                 ListRow::new("tree-add", "Join or create")
                     .icon(Icon::Plus)
                     .muted(true)
