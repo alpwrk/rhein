@@ -116,14 +116,14 @@ async fn fetch_base(http: &reqwest::Client, base: &str) -> Result<Discovery> {
     // non-JSON, or unrecognisable document permits the website's text pointer.
     if response.status().is_success() {
         let body = read_capped(response, DISCOVERY_LIMIT).await?;
-        if let Ok(mut doc) = serde_json::from_slice::<Discovery>(&body)
-            && !doc.server_name.is_empty()
-        {
-            if doc.api.is_empty() {
-                doc.api = base.to_owned();
+        if let Ok(mut doc) = serde_json::from_slice::<Discovery>(&body) {
+            if !doc.server_name.is_empty() {
+                if doc.api.is_empty() {
+                    doc.api = base.to_owned();
+                }
+                doc.api = doc.api.trim_end_matches('/').to_owned();
+                return Ok(doc);
             }
-            doc.api = doc.api.trim_end_matches('/').to_owned();
-            return Ok(doc);
         }
     }
 
@@ -242,16 +242,16 @@ mod tests {
 
     #[test]
     fn public_domains_never_downgrade_to_http() {
-        assert_eq!(candidate_bases("example.com"), ["https://example.com"]);
+        assert_eq!(candidate_bases("example.com"), vec!["https://example.com".to_owned()]);
         assert_eq!(
             candidate_bases("localhost:8448"),
-            ["https://localhost:8448", "http://localhost:8448"]
+            vec!["https://localhost:8448".to_owned(), "http://localhost:8448".to_owned()]
         );
         assert_eq!(
             candidate_bases("b.localhost:8449"),
-            ["https://b.localhost:8449", "http://b.localhost:8449"]
+            vec!["https://b.localhost:8449".to_owned(), "http://b.localhost:8449".to_owned()]
         );
-        assert_eq!(candidate_bases("http://example.com"), ["http://example.com"]);
+        assert_eq!(candidate_bases("http://example.com"), vec!["http://example.com".to_owned()]);
     }
 
     #[test]
