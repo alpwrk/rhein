@@ -85,8 +85,9 @@ fn reject_redirect(response: &reqwest::Response, requested: &str) -> Result<()> 
     // A caller can supply a custom reqwest client (e.g. Rhein's relay-proxied client).
     // Even if it follows redirects internally, never *trust* discovery fetched at a
     // different URL. In particular, the website's pointer is not an HTTP redirect.
+    let expected = Url::parse(requested).context("invalid discovery URL")?;
     ensure!(
-        response.url().as_str() == requested,
+        response.url() == &expected,
         "{requested}: redirected discovery is not supported"
     );
     Ok(())
