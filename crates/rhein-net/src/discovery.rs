@@ -320,13 +320,34 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
             let mut paths = Vec::new();
             for (status, body) in responses {
-                let (mut stream, _) = listener.accept().unwrap();
+                let start = std::time::Instant::now();
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock
+                            && start.elapsed() < Duration::from_secs(5) =>
+                        {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(err) => panic!("mock discovery request did not arrive: {err}"),
+                    }
+                };
                 stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let mut buf = [0; 4096];
-                let count = stream.read(&mut buf).unwrap();
-                let request = String::from_utf8_lossy(&buf[..count]);
+                let mut request = Vec::new();
+                loop {
+                    let count = stream.read(&mut buf).unwrap();
+                    assert!(count > 0, "incomplete mock HTTP request");
+                    request.extend_from_slice(&buf[..count]);
+                    if request.windows(2).any(|pair| pair == b"\r\n") {
+                        break;
+                    }
+                    assert!(request.len() < 8192, "oversized mock HTTP request");
+                }
+                let request = String::from_utf8_lossy(&request);
                 let path = request.split_whitespace().nth(1).unwrap().to_owned();
                 paths.push(path);
                 let reply = format!(
