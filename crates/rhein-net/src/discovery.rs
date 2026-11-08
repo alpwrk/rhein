@@ -111,29 +111,39 @@ async fn fetch_base(http: &reqwest::Client, base: &str) -> Result<Discovery> {
         .send()
         .await
         .with_context(|| format!("{direct_url}: unreachable"))?;
-    // Preserve the existing direct well-known redirect behaviour (e.g. apex -> www).
-    // This exception is only for direct discovery, not for the text pointer or
-    // delegated backend. A non-discovery landing page can still fall back to /telium.txt.
-
-    // Prefer full discovery at the address the user entered, as before. A missing,
-    // non-JSON, or unrecognisable document permits the website's text pointer.
-    if response.status().is_success() {
+    // Prefer full discovery at the address the user entered, as before. Redirects are
+    // deliberately allowed here (e.g. apex -> www); that exception covers only this direct
+    // request, not the text pointer or the delegated backend. A missing, non-JSON or
+    // unrecognisable document permits the website's text pointer.
+    let direct_failure = if response.status().is_success() {
         let body = read_capped(response, DISCOVERY_LIMIT).await?;
-        if let Ok(mut doc) = serde_json::from_slice::<Discovery>(&body) {
-            if !doc.server_name.is_empty() {
+        match serde_json::from_slice::<Discovery>(&body) {
+            Ok(mut doc) if !doc.server_name.is_empty() => {
                 if doc.api.is_empty() {
                     doc.api = base.to_owned();
                 }
                 doc.api = doc.api.trim_end_matches('/').to_owned();
                 return Ok(doc);
             }
+            Ok(_) => "discovery document has no server_name".to_owned(),
+            Err(err) => format!("not a discovery document ({err})"),
         }
-    }
+    } else {
+        format!("HTTP {}", response.status())
+    };
 
+    fetch_via_pointer(http, base, &base_url).await.with_context(|| {
+        format!("{direct_url}: {direct_failure}; the telium.txt fallback failed too")
+    })
+}
+
+/// Resolve discovery through the website's `/telium.txt` pointer. Unlike the direct
+/// request, neither the pointer nor the delegated backend may be reached via a redirect.
+async fn fetch_via_pointer(http: &reqwest::Client, base: &str, base_url: &Url) -> Result<Discovery> {
     // A pointer fetched over an ordinary HTTP website could be rewritten by a
     // network attacker. Explicit local HTTP is only useful for development.
     ensure!(
-        base_url.scheme() == "https" || is_loopback_host(&base_url),
+        base_url.scheme() == "https" || is_loopback_host(base_url),
         "{base}: telium.txt delegation requires HTTPS"
     );
     let pointer_url = format!("{base}/telium.txt");
@@ -159,7 +169,7 @@ async fn fetch_base(http: &reqwest::Client, base: &str) -> Result<Discovery> {
     );
     let body = read_capped(response, POINTER_LIMIT).await?;
     let line = std::str::from_utf8(&body).context("telium.txt must be UTF-8")?;
-    let target = parse_pointer(line, &base_url)?;
+    let target = parse_pointer(line, base_url)?;
 
     // The file only selects a backend. Never recursively follow another pointer:
     // the backend must serve live discovery metadata under the fixed well-known path.
@@ -179,7 +189,7 @@ async fn fetch_base(http: &reqwest::Client, base: &str) -> Result<Discovery> {
     let bytes = read_capped(response, DISCOVERY_LIMIT).await?;
     let mut doc: Discovery = serde_json::from_slice(&bytes)
         .with_context(|| format!("{backend_url}: invalid discovery document"))?;
-    validate_delegated(&doc, &base_url, &target)?;
+    validate_delegated(&doc, base_url, &target)?;
     doc.api = doc.api.trim_end_matches('/').to_owned();
     Ok(doc)
 }
@@ -401,7 +411,11 @@ mod tests {
             ("200 OK", "<html>not a discovery document</html>"),
             ("200 OK", "https://attacker.example"),
         ]);
-        assert!(discover(&reqwest::Client::new(), &base).await.is_err());
+        let err = discover(&reqwest::Client::new(), &base).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must point to the account domain or one of its subdomains"),
+            "{err:#}"
+        );
         assert_eq!(
             handle.join().unwrap(),
             ["/.well-known/telium/server", "/website", "/telium.txt"]
@@ -414,11 +428,31 @@ mod tests {
             ("404 Not Found", "not found"),
             ("200 OK", "https://attacker.example"),
         ]);
-        let result = discover(&reqwest::Client::new(), &base).await;
-        assert!(result.is_err());
+        let err = discover(&reqwest::Client::new(), &base).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("HTTP 404"), "{message}");
+        assert!(message.contains("must point to the account domain"), "{message}");
         assert_eq!(
             handle.join().unwrap(),
             ["/.well-known/telium/server", "/telium.txt"]
+        );
+    }
+
+    #[tokio::test]
+    async fn redirected_pointer_is_rejected() {
+        let (base, handle) = serve(vec![
+            ("404 Not Found", "not found"),
+            ("302 Found", "/elsewhere"),
+            ("200 OK", "chat.example"),
+        ]);
+        let err = discover(&reqwest::Client::new(), &base).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("redirected discovery is not supported"),
+            "{err:#}"
+        );
+        assert_eq!(
+            handle.join().unwrap(),
+            ["/.well-known/telium/server", "/telium.txt", "/elsewhere"]
         );
     }
 }
