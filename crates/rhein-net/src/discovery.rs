@@ -111,7 +111,10 @@ async fn fetch_base(http: &reqwest::Client, base: &str) -> Result<Discovery> {
         .send()
         .await
         .with_context(|| format!("{direct_url}: unreachable"))?;
-    reject_redirect(&response, &direct_url)?;
+    // Keep the existing behaviour for direct discovery: ordinary website
+    // redirects (for example apex -> www) are allowed here. Unlike the
+    // delegated pointer and backend, this is not a security-boundary check.
+    // A redirected non-discovery page can still fall back to /telium.txt.
 
     // Prefer full discovery at the address the user entered, as before. A missing,
     // non-JSON, or unrecognisable document permits the website's text pointer.
@@ -350,9 +353,14 @@ mod tests {
                 let request = String::from_utf8_lossy(&request);
                 let path = request.split_whitespace().nth(1).unwrap().to_owned();
                 paths.push(path);
+                let (extra_headers, reply_body) = if status.starts_with("302 ") {
+                    (format!("Location: {body}\r\n"), "")
+                } else {
+                    (String::new(), body)
+                };
                 let reply = format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
+                    "HTTP/1.1 {status}\r\n{extra_headers}Content-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{reply_body}",
+                    reply_body.len()
                 );
                 stream.write_all(reply.as_bytes()).unwrap();
             }
@@ -371,6 +379,34 @@ mod tests {
         assert_eq!(doc.server_name, "local.test");
         assert_eq!(doc.api, "http://localhost:8448");
         assert_eq!(handle.join().unwrap(), ["/.well-known/telium/server"]);
+    }
+
+    #[tokio::test]
+    async fn redirected_direct_discovery_still_succeeds() {
+        let (base, handle) = serve(vec![
+            ("302 Found", "/www/.well-known/telium/server"),
+            ("200 OK", r#"{"server_name":"local.test","api":"http://localhost:8448"}"#),
+        ]);
+        let doc = discover(&reqwest::Client::new(), &base).await.unwrap();
+        assert_eq!(doc.server_name, "local.test");
+        assert_eq!(
+            handle.join().unwrap(),
+            ["/.well-known/telium/server", "/www/.well-known/telium/server"]
+        );
+    }
+
+    #[tokio::test]
+    async fn redirected_website_page_still_tries_txt_fallback() {
+        let (base, handle) = serve(vec![
+            ("302 Found", "/website"),
+            ("200 OK", "<html>not a discovery document</html>"),
+            ("200 OK", "https://attacker.example"),
+        ]);
+        assert!(discover(&reqwest::Client::new(), &base).await.is_err());
+        assert_eq!(
+            handle.join().unwrap(),
+            ["/.well-known/telium/server", "/website", "/telium.txt"]
+        );
     }
 
     #[tokio::test]
