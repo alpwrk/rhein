@@ -111,10 +111,9 @@ async fn fetch_base(http: &reqwest::Client, base: &str) -> Result<Discovery> {
         .send()
         .await
         .with_context(|| format!("{direct_url}: unreachable"))?;
-    // Keep the existing behaviour for direct discovery: ordinary website
-    // redirects (for example apex -> www) are allowed here. Unlike the
-    // delegated pointer and backend, this is not a security-boundary check.
-    // A redirected non-discovery page can still fall back to /telium.txt.
+    // Preserve the existing direct well-known redirect behaviour (e.g. apex -> www).
+    // This exception is only for direct discovery, not for the text pointer or
+    // delegated backend. A non-discovery landing page can still fall back to /telium.txt.
 
     // Prefer full discovery at the address the user entered, as before. A missing,
     // non-JSON, or unrecognisable document permits the website's text pointer.
