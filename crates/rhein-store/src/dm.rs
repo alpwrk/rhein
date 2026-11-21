@@ -5,18 +5,20 @@
 //!    when this session came from a password sign-in, else with the copy this device kept;
 //! 2. keep one MLS signature key per account on this device (the web client does the same, so a
 //!    re-login is the same correspondent rather than a stranger);
-//! 3. open the account's cross-signing secret with R, check it really belongs to the published
-//!    identity key, vouch for this device's MLS key, and make sure the identity is anchored in its
-//!    continuity document, pinning what we saw.
+//! 3. open the account's cross-signing secret with R (or make one, for an account that has none),
+//!    check it really belongs to the published identity key, vouch for this device's MLS key, and
+//!    make sure the identity is anchored in its continuity document, pinning what we saw.
 //!
 //! Secrets live in a 0600 file per account in the config directory; nothing here is ever written
 //! to the server except what the web client writes too (a fresh vault for an account that has
-//! none, the device cross-signature and the identity anchor).
+//! none, with the recovery key's copy when sign-up made one; the account's first cross-signing
+//! key; the device cross-signature and the identity anchor).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
+use rhein_mls::recovery::{self, RecoveryKey};
 use rhein_mls::trust::{self, IdentityKey, Pin};
 use rhein_mls::vault::{self, Key, Keyring, Opened};
 use rhein_net::Api;
@@ -33,6 +35,13 @@ pub struct Secrets {
     pub mls_signature: Option<(String, String)>,
     /// Identity pins by user id.
     pub pins: BTreeMap<String, Pin>,
+    /// A cross-signing key this device sent to the server but never heard back about (public,
+    /// secret, base64): if the server kept it, the next bring-up takes it instead of a new one.
+    pub pending_cross_signing: Option<(String, String)>,
+    /// A recovery key made here that the person has not yet said they saved. Kept (in this 0600
+    /// file, as the web client keeps it in its own storage) until they do, so it can be shown
+    /// again rather than lost.
+    pub unsaved_recovery_key: Option<String>,
 }
 
 fn secrets_path(user_id: &str) -> PathBuf {
@@ -73,6 +82,12 @@ pub struct DmStatus {
     pub cross_signed: bool,
     /// Something is wrong with the published identity (a replaced key, a broken chain).
     pub identity_problem: Option<String>,
+    /// The account has a recovery key (`recovery_public_key` on the server).
+    pub recovery_key_enrolled: bool,
+    /// The vault carries the recovery key's copy of the keyring.
+    pub recovery_copy: bool,
+    /// A recovery key made on this device that still has to be written down.
+    pub unsaved_recovery_key: Option<String>,
     /// This device's MLS signature key (base64), as the ratchet tree and cross-signature carry it.
     pub mls_key: String,
 }
@@ -92,6 +107,7 @@ impl DmStatus {
 pub async fn bring_up(api: &Api, user_id: &str, device_id: &str, wrapper: Option<Key>) -> Result<DmStatus> {
     let mut secrets = Secrets::load(user_id);
     let mut status = DmStatus::default();
+    let recovery_key = secrets.unsaved_recovery_key.as_deref().and_then(|t| RecoveryKey::parse(t).ok());
 
     // 1. The recovery keyring.
     let doc = api.vault().await.context("vault")?;
@@ -104,16 +120,30 @@ pub async fn bring_up(api: &Api, user_id: &str, device_id: &str, wrapper: Option
         Opened::Locked { reason, .. } => status.locked = Some(reason.to_owned()),
         Opened::Missing => match &wrapper {
             // An account without DMs set up yet (one registered with Rhein): create the vault the
-            // way the web client does on its first sign-in.
+            // way the web client does on its first sign-in. Not over an account key, though: a
+            // new ring opens nothing that key's account already sealed (the web's `vault_missing`).
             Some(wrapper) => {
-                let keyring = Keyring::generate();
-                api.put_vault(&vault::new_vault_body(&keyring, wrapper)).await.context("creating the vault")?;
-                status.vault_mode = "opaque_custody".into();
-                secrets.keyring = Some(keyring);
+                let root = api.cross_signing().await.context("cross-signing")?;
+                if root["exists"].as_bool().unwrap_or(false) && secrets.keyring.is_none() {
+                    status.locked = Some("this account has an identity key but no recovery vault; open the Telium web client to repair it".into());
+                } else {
+                    let keyring = secrets.keyring.clone().unwrap_or_else(Keyring::generate);
+                    // Kept before the write goes out, so a lost answer loses nothing.
+                    secrets.keyring = Some(keyring.clone());
+                    secrets.store(user_id)?;
+                    api.put_vault(&vault::new_vault_body(&keyring, wrapper, recovery_key.as_ref()))
+                        .await
+                        .context("creating the vault")?;
+                    status.vault_mode = "opaque_custody".into();
+                }
             }
             None => status.locked = Some("sign in with your password once on this device".into()),
         },
     }
+    let vault_now = if doc["exists"].as_bool().unwrap_or(false) { doc } else { api.vault().await.unwrap_or(doc) };
+    status.recovery_key_enrolled = vault_now["recovery_key_enrolled"].as_bool().unwrap_or(false);
+    status.recovery_copy = recovery::is_vault_copy(vault_now["independent_ciphertext"].as_str());
+    status.unsaved_recovery_key = secrets.unsaved_recovery_key.clone();
 
     // 2. This account's MLS signature key on this device.
     let (_, public) = match &secrets.mls_signature {
@@ -128,15 +158,33 @@ pub async fn bring_up(api: &Api, user_id: &str, device_id: &str, wrapper: Option
     status.mls_key = public.clone();
 
     // 3. Cross-signing and continuity.
-    let cs = api.cross_signing().await.context("cross-signing")?;
+    let mut cs = api.cross_signing().await.context("cross-signing")?;
+    // An account with no identity key (one registered with Rhein, before this): make it, sealed
+    // under R alone, as the web client's `ensureRoot` does. Since Telium desktop 0.4.0 web peers
+    // refuse an account without one wherever their home advertises identity continuity, so
+    // without this a Rhein-made account is left out of every DM a browser starts.
+    if !cs["exists"].as_bool().unwrap_or(false)
+        && let Some(ring) = secrets.keyring.clone()
+        && status.locked.is_none()
+    {
+        cs = create_identity(api, user_id, &mut secrets, &ring).await?;
+    }
     if cs["exists"].as_bool().unwrap_or(false) {
         let published = cs["identity_key"].as_str().unwrap_or_default().to_owned();
         status.identity_key = Some(published.clone());
-        let held = secrets.cross_signing.as_deref().and_then(|s| vault::unb64(s).ok()).and_then(|b| IdentityKey::from_secret(&b).ok());
-        let opened = held.or_else(|| {
+        let from_b64 = |s: &str| vault::unb64(s).ok().and_then(|b| IdentityKey::from_secret(&b).ok());
+        let held = secrets.cross_signing.as_deref().and_then(from_b64).filter(|k| k.binds(user_id, &published));
+        // A create this device made but never heard back about: the server may have kept it.
+        let pending = secrets
+            .pending_cross_signing
+            .as_ref()
+            .filter(|(public, _)| *public == published)
+            .and_then(|(_, secret)| from_b64(secret));
+        let opened = held.or(pending).or_else(|| {
             let ring = secrets.keyring.as_ref()?;
             trust::open_cross_signing_secret(cs["sealed_secret"].as_str().unwrap_or_default(), ring)
         });
+        secrets.pending_cross_signing = None;
         match opened {
             Some(key) if key.binds(user_id, &published) => {
                 secrets.cross_signing = Some(vault::b64(key.secret()));
@@ -180,4 +228,60 @@ pub async fn bring_up(api: &Api, user_id: &str, device_id: &str, wrapper: Option
 
     secrets.store(user_id)?;
     Ok(status)
+}
+
+/// Publishes a new account key with `create_only`, keeping it aside first so a lost answer loses
+/// nothing; another device that made one first wins, and its row comes back instead.
+async fn create_identity(api: &Api, user_id: &str, secrets: &mut Secrets, ring: &Keyring) -> Result<serde_json::Value> {
+    let key = IdentityKey::generate();
+    let public = key.public_b64();
+    secrets.pending_cross_signing = Some((public.clone(), vault::b64(key.secret())));
+    secrets.store(user_id)?;
+    match api.create_cross_signing(&public, &trust::seal_cross_signing_secret(&key, ring)).await {
+        Ok(_) => {
+            log::info!("made this account's identity key");
+            secrets.cross_signing = Some(vault::b64(key.secret()));
+            secrets.pending_cross_signing = None;
+        }
+        // Another device made the account's key first: take that one as it stands.
+        Err(err) if err.status() == Some(409) => secrets.pending_cross_signing = None,
+        // Anything else may have reached the server; the pending copy covers that.
+        Err(err) => return Err(anyhow::Error::new(err).context("creating the account's identity key")),
+    }
+    secrets.store(user_id)?;
+    Ok(api.cross_signing().await.context("cross-signing")?)
+}
+
+/// Makes a recovery key for an account that has none, proving the password: its public half and
+/// the vault copy are written together (`reauth/finish`), as the web client's Settings does. The
+/// key is kept here as unsaved until the person says they wrote it down.
+pub async fn enroll_recovery_key(api: &Api, user_id: &str, password: &str, ksf: &rhein_auth::SerenityKsf) -> Result<String> {
+    let mut secrets = Secrets::load(user_id);
+    let ring = secrets.keyring.clone().context("unlock encrypted messages on this device first")?;
+    let key = RecoveryKey::generate();
+    rhein_net::auth::enroll_recovery_key(api, password, ksf, &key.public_key(), &key.seal_vault_copy(&ring))
+        .await
+        .map_err(|err| match err.downcast_ref::<rhein_net::ApiError>().and_then(|e| e.status()) {
+            Some(409) => anyhow::anyhow!("this account already has a recovery key"),
+            _ => err,
+        })?;
+    let text = key.text();
+    secrets.unsaved_recovery_key = Some(text.clone());
+    secrets.store(user_id)?;
+    Ok(text)
+}
+
+/// The person wrote the recovery key down: stop keeping it.
+pub fn recovery_key_saved(user_id: &str) -> Result<()> {
+    let mut secrets = Secrets::load(user_id);
+    secrets.unsaved_recovery_key = None;
+    secrets.store(user_id)
+}
+
+/// Keeps a recovery key made for a sign-up, before the account exists, so the vault bring-up
+/// after it can seal the copy and the person can be shown it.
+pub fn keep_new_recovery_key(user_id: &str, key: &RecoveryKey) -> Result<()> {
+    let mut secrets = Secrets::load(user_id);
+    secrets.unsaved_recovery_key = Some(key.text());
+    secrets.store(user_id)
 }

@@ -94,6 +94,28 @@ fn acceptable(publication: &RemoteTrackPublication, encrypted: bool) -> bool {
 /// One participant's side of an SFU call.
 /// The participant attribute the SFU stamps with its clamp of the guild's ceiling.
 const MAX_BITRATE_ATTRIBUTE: &str = "telium.max_bitrate";
+/// The data topic the Telium SFU (0.2.x) tells a publisher on, and the room, that it muted a
+/// video track whose declared layers exceed the participant's ceiling (`MEDIA_LIMIT_TOPIC`).
+pub const MEDIA_LIMIT_TOPIC: &str = "telium.media-limit";
+
+/// What a `telium.media-limit` notice says, as `voice-sfu.js` reads it. Only the server sends
+/// these (a participant could forge one to make us drop our own video), so anything a
+/// participant sent is ignored.
+pub fn media_limit_event(topic: Option<&str>, from_participant: bool, payload: &[u8]) -> Option<CallEvent> {
+    if topic != Some(MEDIA_LIMIT_TOPIC) || from_participant {
+        return None;
+    }
+    let message: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let slot = match message["source"].as_str()? {
+        "SCREEN_SHARE" => Slot::Screen,
+        "CAMERA" => Slot::Camera,
+        _ => return None,
+    };
+    match message["identity"].as_str() {
+        Some(identity) => Some(CallEvent::RemoteMediaLimited { from: identity.to_owned(), slot }),
+        None => Some(CallEvent::MediaLimited { slot, max_bitrate: message["max_bitrate"].as_u64().filter(|b| *b > 0) }),
+    }
+}
 
 pub struct SfuCall {
     room: Room,
@@ -105,6 +127,10 @@ pub struct SfuCall {
     send_slot: Option<i32>,
     /// The room runs frame encryption: a track published in the clear is never subscribed.
     encrypted: bool,
+    /// What each published camera or screen was made from, to republish it smaller.
+    videos: HashMap<Slot, crate::video::VideoOut>,
+    /// A ceiling the SFU named when it muted a track of ours (`telium.media-limit`).
+    limited_to: Option<u64>,
 }
 
 impl SfuCall {
@@ -122,7 +148,16 @@ impl SfuCall {
         }
         let (room, room_events) = Room::connect(&session.url, &session.token, options).await.context("joining the LiveKit room")?;
         let (events, rx) = mpsc::unbounded_channel();
-        let mut call = SfuCall { room, session, watching: HashSet::new(), published: HashMap::new(), send_slot: None, encrypted };
+        let mut call = SfuCall {
+            room,
+            session,
+            watching: HashSet::new(),
+            published: HashMap::new(),
+            send_slot: None,
+            encrypted,
+            videos: HashMap::new(),
+            limited_to: None,
+        };
         // What was already in the room before we came.
         for participant in call.room.remote_participants().values() {
             let _ = events.send(CallEvent::Link { user: participant.identity().to_string(), up: true });
@@ -130,7 +165,8 @@ impl SfuCall {
                 publication.set_subscribed(!is_screen(publication.source()) && acceptable(publication, encrypted));
             }
         }
-        tokio::spawn(pump(room_events, events, encrypted));
+        let me = call.room.local_participant().identity().to_string();
+        tokio::spawn(pump(room_events, events, encrypted, me));
 
         let track = LocalAudioTrack::create_audio_track("microphone", RtcAudioSource::Native(microphone));
         call.room
@@ -174,11 +210,15 @@ impl SfuCall {
         }
     }
 
+    pub fn is_watching(&self, user: &str) -> bool {
+        self.watching.contains(user)
+    }
+
     /// The smallest publish ceiling in view: the one the SFU stamped on our participant (its clamp
     /// of the guild's), and the one the session came with.
     fn ceiling(&self) -> Option<u64> {
         let stamped = self.room.local_participant().attributes().get(MAX_BITRATE_ATTRIBUTE).and_then(|v| v.parse::<u64>().ok());
-        [stamped, self.session.max_bitrate].into_iter().flatten().filter(|c| *c > 0).min()
+        [stamped, self.session.max_bitrate, self.limited_to].into_iter().flatten().filter(|c| *c > 0).min()
     }
 
     /// Publishes a camera or a screen (simulcast, so each viewer gets the layer it can take),
@@ -211,8 +251,23 @@ impl SfuCall {
             .await
             .context("publishing video")?;
         self.published.insert(slot, publication.sid());
+        self.videos.insert(slot, video.clone());
         self.aim_senders();
         Ok(())
+    }
+
+    /// The SFU muted our `slot` for exceeding the ceiling: republish the same capture under the
+    /// ceiling it named (or, with none, three quarters of the current one), as the web client's
+    /// media-limit repair does. False when there is nothing left to republish.
+    pub async fn shrink(&mut self, slot: Slot, max_bitrate: Option<u64>) -> Result<bool> {
+        let Some(video) = self.videos.get(&slot).cloned() else { return Ok(false) };
+        let lower = max_bitrate.or_else(|| self.ceiling().map(|c| c * 3 / 4)).filter(|c| *c > 0);
+        self.limited_to = match (self.limited_to, lower) {
+            (Some(held), Some(new)) => Some(held.min(new)),
+            (held, new) => new.or(held),
+        };
+        self.publish_video(slot, &video).await?;
+        Ok(true)
     }
 
     /// Installs a new epoch's key and sends under it from now on. The earlier keys stay in the
@@ -236,6 +291,7 @@ impl SfuCall {
 
     /// Takes a published camera or screen down again.
     pub async fn unpublish(&mut self, slot: Slot) {
+        self.videos.remove(&slot);
         if let Some(sid) = self.published.remove(&slot) {
             let _ = self.room.local_participant().unpublish_track(&sid).await;
         }
@@ -247,7 +303,7 @@ impl SfuCall {
 }
 
 /// Turns the room's events into call events, and subscribes to what arrives later.
-async fn pump(mut room_events: mpsc::UnboundedReceiver<RoomEvent>, events: mpsc::UnboundedSender<CallEvent>, encrypted: bool) {
+async fn pump(mut room_events: mpsc::UnboundedReceiver<RoomEvent>, events: mpsc::UnboundedSender<CallEvent>, encrypted: bool, me: String) {
     while let Some(event) = room_events.recv().await {
         let out = match event {
             RoomEvent::ParticipantConnected(p) => Some(CallEvent::Link { user: p.identity().to_string(), up: true }),
@@ -268,6 +324,10 @@ async fn pump(mut room_events: mpsc::UnboundedReceiver<RoomEvent>, events: mpsc:
                 slot_of(publication.source()).map(|slot| CallEvent::TrackEnded { from: participant.identity().to_string(), slot })
             }
             RoomEvent::TrackSubscriptionFailed { participant, .. } => Some(CallEvent::KeyTrouble { from: participant.identity().to_string() }),
+            // The SFU's room-wide notice reaches the muted publisher too: ours is handled by
+            // the one addressed to us.
+            RoomEvent::DataReceived { payload, topic, participant, .. } => media_limit_event(topic.as_deref(), participant.is_some(), &payload)
+                .filter(|e| !matches!(e, CallEvent::RemoteMediaLimited { from, .. } if *from == me)),
             RoomEvent::Disconnected { reason } => match reason {
                 // Deliberate teardowns are not voice trouble.
                 DisconnectReason::ClientInitiated | DisconnectReason::RoomClosed | DisconnectReason::RoomDeleted => None,
@@ -288,5 +348,29 @@ async fn pump(mut room_events: mpsc::UnboundedReceiver<RoomEvent>, events: mpsc:
         {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_limit_notices() {
+        let own = br#"{"track_sid":"TR_1","source":"SCREEN_SHARE","max_bitrate":2500000}"#;
+        assert!(matches!(
+            media_limit_event(Some(MEDIA_LIMIT_TOPIC), false, own),
+            Some(CallEvent::MediaLimited { slot: Slot::Screen, max_bitrate: Some(2_500_000) })
+        ));
+        let theirs = br#"{"identity":"@b:x","track_sid":"TR_2","source":"CAMERA"}"#;
+        assert!(matches!(
+            media_limit_event(Some(MEDIA_LIMIT_TOPIC), false, theirs),
+            Some(CallEvent::RemoteMediaLimited { slot: Slot::Camera, .. })
+        ));
+        // Forged by a participant, another topic, or not video: nothing.
+        assert!(media_limit_event(Some(MEDIA_LIMIT_TOPIC), true, own).is_none());
+        assert!(media_limit_event(Some("chat"), false, own).is_none());
+        assert!(media_limit_event(Some(MEDIA_LIMIT_TOPIC), false, br#"{"source":"MICROPHONE"}"#).is_none());
+        assert!(media_limit_event(Some(MEDIA_LIMIT_TOPIC), false, b"not json").is_none());
     }
 }

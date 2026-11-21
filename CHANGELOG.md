@@ -2,6 +2,18 @@
 
 Every release of Rhein, newest first. The release notes on GitHub come from here.
 
+## Unreleased
+
+Catches up with Telium server 0.5 and desktop 0.4, which changed what an account needs before people on the web client can message it.
+
+- **Encrypted DMs**: accounts made in Rhein now get their identity key at the first sign-in, as the web client makes it. Since Telium desktop 0.4.0 the web client leaves out of group chats anyone without one, so until now an account that had only ever used Rhein could not be messaged from a browser. An account whose key the web client already made keeps that one.
+- **Recovery key**: signing up makes a recovery key, and Rhein asks you to save it (Settings → Encryption). If you forget your password, the Telium web client's password reset takes it and keeps your encrypted history. Accounts made with an earlier Rhein can make one there with their password.
+- **Group chats**: group names set in the web client show in Rhein, and right-clicking a group renames it, for whoever the group's rules allow.
+- **Sign-up**: servers that register by invitation take the registration code you were given.
+- **Voice and video**: when the voice relay pauses your camera or screen for going over its bandwidth limit, Rhein sends it again at a lower rate. When it pauses someone else's, Rhein says why the picture stopped.
+- **Sign-in**: an account whose password uses a newer key-stretching setting than this Rhein knows gets a message to update Rhein, instead of "wrong password". A vault in a custody mode Telium retired shows as locked instead of stopping encrypted messages from starting.
+- **Fixes**: a device let back into a group after a start-over no longer rejoins from information about the old group, and its rejoin request now says which key it holds and how far it has read, so whoever answers can repair it.
+
 ## 0.1.1 – 2026-10-29
 
 Rhein now keeps itself up to date, and calls in voice channels hold up through server and network trouble instead of ending.

@@ -158,6 +158,8 @@ pub struct SettingsView {
     meter: Option<gpui::Task<()>>,
     add_server: Entity<TextInput>,
     unlock_password: Entity<TextInput>,
+    /// The password, to make a recovery key for an account that has none.
+    recovery_password: Entity<TextInput>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -191,6 +193,7 @@ impl SettingsView {
         });
         let add_server = cx.new(|cx| TextInput::new("chat.example.com", cx));
         let unlock_password = cx.new(|cx| TextInput::new("Your account password", cx).masked());
+        let recovery_password = cx.new(|cx| TextInput::new("Your account password", cx).masked());
         let subs = vec![
             cx.observe(&client, |this, _, cx| {
                 this.load_look(cx);
@@ -235,6 +238,7 @@ impl SettingsView {
             meter: None,
             add_server,
             unlock_password,
+            recovery_password,
             focus,
             _subs: subs,
         };
@@ -1877,17 +1881,83 @@ impl SettingsView {
                         "Cross-signing",
                         match (&s.identity_key, s.cross_signed, &s.identity_problem) {
                             (_, _, Some(problem)) => format!("problem: {problem}"),
-                            (None, _, _) => "no identity yet (set up by the Telium web client)".into(),
+                            (None, _, _) => "no identity key yet".into(),
                             (Some(_), true, _) => "this device is vouched for".into(),
                             (Some(_), false, _) => "not vouched for yet".into(),
                         },
                         Some(s.identity_problem.is_none() && (s.identity_key.is_none() || s.cross_signed)),
                     ))
-                    .children(s.immutable_id.clone().map(|id| line("Identity", id, None)));
+                    .children(s.immutable_id.clone().map(|id| line("Identity", id, None)))
+                    .child(line(
+                        "Recovery key",
+                        match (s.recovery_key_enrolled, s.recovery_copy) {
+                            (true, true) => "made; it can bring your history back after a password reset".into(),
+                            (true, false) => "made, but the vault has no copy for it (open the Telium web client to reconnect it)".into(),
+                            (false, _) => "not made yet".into(),
+                        },
+                        Some(s.recovery_key_enrolled && s.recovery_copy),
+                    ));
                 if let Some(err) = &error {
                     body = body.child(div().pt_2().text_size(text::SM).text_color(t.danger).child(err.clone()));
                 }
             }
+        }
+        // A recovery key made on this device and not yet written down: shown until it is.
+        if let Some(key) = status.as_ref().and_then(|s| s.unsaved_recovery_key.clone()) {
+            let client = self.client.clone();
+            let copy = key.clone();
+            body = body.child(
+                div()
+                    .mt_4()
+                    .p_3()
+                    .rounded(radius::MD)
+                    .bg(t.bg_panel)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Save your recovery key"))
+                    .child(div().text_size(text::SM).text_color(t.text_faint).child(
+                        "If you forget your password, this key resets it in the Telium web client's password reset and keeps your encrypted history. Keep it somewhere safe, away from this computer. It is not shown again once you confirm.",
+                    ))
+                    .child(div().font_family(FONT_MONO).text_size(text::SM).child(key))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Button::new("recovery-copy", "Copy").on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))
+                            }))
+                            .child(Button::new("recovery-saved", "I saved it").primary().on_click(move |_, _, cx| {
+                                client.update(cx, |c, cx| c.recovery_key_saved(cx))
+                            })),
+                    ),
+            );
+        } else if status.as_ref().is_some_and(|s| s.locked.is_none() && !s.recovery_key_enrolled) {
+            let client = self.client.clone();
+            let input = self.recovery_password.clone();
+            body = body.child(
+                div()
+                    .pt_4()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Make a recovery key"))
+                    .child(div().text_size(text::SM).text_color(t.text_faint).child(
+                        "Without one, a forgotten password means losing your encrypted history. Enter your password to make it.",
+                    ))
+                    .child(
+                        div().flex().gap_2().child(div().flex_1().child(self.recovery_password.clone())).child(
+                            Button::new("recovery-make", "Make key").primary().on_click(move |_, _, cx| {
+                                let password = input.read(cx).text().to_owned();
+                                if password.is_empty() {
+                                    return;
+                                }
+                                input.update(cx, |i, cx| i.clear(cx));
+                                client.update(cx, |c, cx| c.create_recovery_key(password, cx));
+                            }),
+                        ),
+                    ),
+            );
         }
         // A session restored without the password can't open the vault; proving it again does.
         if status.as_ref().is_none_or(|s| s.locked.is_some()) {

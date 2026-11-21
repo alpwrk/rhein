@@ -71,6 +71,11 @@ pub enum CallEvent {
     /// A peer's media failed to open: on an encrypted call probably a commit behind, so the
     /// caller asks the encryption group where it stands.
     KeyTrouble { from: String },
+    /// The SFU muted one of our video tracks for declaring more than our bitrate ceiling
+    /// (`telium.media-limit`): republish it smaller, under `max_bitrate` when it says.
+    MediaLimited { slot: Slot, max_bitrate: Option<u64> },
+    /// The SFU paused someone else's video for the same reason: theirs to repair, ours to explain.
+    RemoteMediaLimited { from: String, slot: Slot },
 }
 
 enum Input {

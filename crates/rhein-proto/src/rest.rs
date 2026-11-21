@@ -42,6 +42,9 @@ pub struct Capabilities {
     pub gateway: Option<String>,
     pub roles: Value,
     pub registration_open: bool,
+    /// Sign-up is by registration code only (Telium server 0.4.1+): `registration_open` is
+    /// false, but someone holding a code may still register.
+    pub registration_code_required: bool,
     pub registration_min_password_len: Option<u32>,
     pub auth: AuthCapabilities,
 }
@@ -70,6 +73,8 @@ pub struct ErrorBody {
 pub struct RegisterStart<'a> {
     pub localpart: &'a str,
     pub registration_request: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registration_code: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +90,13 @@ pub struct RegisterFinish<'a> {
     pub registration_record: String,
     pub device_name: &'a str,
     pub device_pubkey: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registration_code: Option<&'a str>,
+    /// The key-stretching set the record was made with (`opaque_ksf_version`).
+    pub ksf_version: i64,
+    /// The account recovery key's public half, so a password reset can be proven later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_public_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +111,9 @@ pub struct LoginStartResponse {
     pub login_response: String,
     #[serde(default)]
     pub legacy_upgrade_required: bool,
+    /// The key-stretching set the account's record was made with; absent means 1.
+    #[serde(default)]
+    pub ksf_version: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,6 +135,9 @@ pub struct HomeSession {
     pub access_token: String,
     pub expires_at: Option<Millis>,
     pub server_name: String,
+    /// Registration only: the server kept the recovery key's public half.
+    #[serde(default)]
+    pub recovery_key_enrolled: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

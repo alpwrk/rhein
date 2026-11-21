@@ -365,6 +365,8 @@ pub struct Client {
     voice_chat_open: Option<String>,
     /// Per conversation, our newest message someone else has read.
     dm_seen: HashMap<String, String>,
+    /// Group names carried inside the encryption (`RENAME`), by conversation.
+    dm_names: HashMap<String, String>,
     /// The read receipt waiting to go out.
     read_flush: Option<Task<()>>,
     /// Local covers of shared activities, uploaded to the home server.
@@ -510,6 +512,7 @@ impl Client {
             window_active: true,
             alerts: notify::Alerts::default(),
             dm_seen: HashMap::new(),
+            dm_names: HashMap::new(),
             voice_chat_open: None,
             typing_sent: std::collections::HashSet::new(),
             migration_alert: None,
@@ -627,7 +630,16 @@ impl Client {
 
     /// Signs in (or registers) with OPAQUE. `server` is a domain such as `chat.example.com` or
     /// `localhost:8448`; `user` is a localpart or a full `@user:server`.
-    pub fn sign_in(&mut self, server: String, user: String, password: String, register: bool, mfa_code: Option<String>, cx: &mut Context<Self>) {
+    pub fn sign_in(
+        &mut self,
+        server: String,
+        user: String,
+        password: String,
+        register: bool,
+        mfa_code: Option<String>,
+        registration_code: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.phase == Phase::SigningIn {
             return;
         }
@@ -647,7 +659,21 @@ impl Client {
                 let ksf = SerenityKsf::memory_constrained();
                 let user = user.trim();
                 let signed = if register {
-                    auth::register(&api, localpart(user), &password, &device, &device_name, &ksf).await?
+                    // A recovery key from the start, as the web client's sign-up makes one: its
+                    // public half goes with the registration, its copy of the DM keyring with the
+                    // vault, and the person is shown it once signed in.
+                    let recovery = rhein_mls::recovery::RecoveryKey::generate();
+                    let public = recovery.public_key();
+                    let options = auth::RegisterOptions {
+                        registration_code: registration_code.as_deref(),
+                        recovery_public_key: Some(&public),
+                    };
+                    let signed = auth::register_with(&api, localpart(user), &password, &device, &device_name, &ksf, options).await?;
+                    // Shown (and sealed into the vault) only if the server kept its public half.
+                    if signed.session.recovery_key_enrolled {
+                        crate::dm::keep_new_recovery_key(&signed.session.user_id, &recovery)?;
+                    }
+                    signed
                 } else {
                     auth::login_with_code(&api, user, &password, &device, &device_name, &ksf, mfa_code.as_deref().map(str::trim)).await?
                 };
@@ -851,6 +877,37 @@ impl Client {
         .detach();
     }
 
+    /// Makes a recovery key for an account that has none (one registered with an older Rhein),
+    /// proving the password. The key is then shown until the person says they saved it.
+    pub fn create_recovery_key(&mut self, password: String, cx: &mut Context<Self>) {
+        let Some((api, user)) = self.home.as_ref().map(|h| (h.api.clone(), h.user_id.clone())) else { return };
+        let io = self.io.clone();
+        self.dm_error = None;
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move { crate::dm::enroll_recovery_key(&api, &user, &password, &SerenityKsf::memory_constrained()).await })).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => this.bring_up_dm(cx),
+                    Err(err) => this.dm_error = Some(friendly(&err)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The person wrote the recovery key down; it is no longer kept or shown.
+    pub fn recovery_key_saved(&mut self, cx: &mut Context<Self>) {
+        let Some(user) = self.home.as_ref().map(|h| h.user_id.clone()) else { return };
+        if let Err(err) = crate::dm::recovery_key_saved(&user) {
+            self.dm_error = Some(format!("{err:#}"));
+        } else if let Some(dm) = self.dm.as_mut() {
+            dm.unsaved_recovery_key = None;
+        }
+        cx.notify();
+    }
+
     /// Opens the DM recovery keyring and brings cross-signing up, in the background.
     fn bring_up_dm(&mut self, cx: &mut Context<Self>) {
         let Some(home) = &self.home else { return };
@@ -890,6 +947,7 @@ impl Client {
         self.media_kinds.clear();
         self.alerts = notify::Alerts::default();
         self.dm_seen.clear();
+        self.dm_names.clear();
         self.read_flush = None;
         self.account_prefs = serde_json::Value::Object(Default::default());
         self.migration_alert = None;
@@ -2489,6 +2547,9 @@ impl Client {
     }
 
     pub fn conversation_title(&self, c: &rhein_proto::Conversation) -> String {
+        if let Some(name) = self.dm_names.get(&c.id) {
+            return name.clone();
+        }
         let me = self.user_id().unwrap_or_default();
         crate::social::conversation_title(c, me, |u| self.friend_or_local_name(u))
     }

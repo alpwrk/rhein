@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use openmls::prelude::{GroupId, MlsGroup, OpenMlsProvider as _};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use rhein_mls::payload::{Body, Payload};
@@ -60,6 +60,10 @@ pub struct ConversationState {
     /// frame id → (by, author, snippet).
     pub pins: BTreeMap<String, (String, String, String)>,
     pub call_sfu: Option<String>,
+    /// The group's name, when someone the policy lets gave it one (`RENAME`).
+    pub name: Option<String>,
+    /// Who renamed the group and to what, newest last, at most `RENAME_LOG_MAX`.
+    pub renames: Vec<Rename>,
     /// Why the walk stopped, if it did.
     pub error: Option<String>,
     /// How far each other member has read (their read receipts, kept only while ours are on).
@@ -67,6 +71,18 @@ pub struct ConversationState {
     /// The last message our own read receipt named.
     pub sent_read: Option<String>,
 }
+
+/// One rename, as the web client's history mirror keeps it (`{id, by, name, at}`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Rename {
+    pub id: String,
+    pub by: String,
+    pub name: Option<String>,
+    pub at: i64,
+}
+
+const RENAME_LOG_MAX: usize = 50;
 
 impl ConversationState {
     /// Our newest message that someone else has read, for the "Seen" under it.
@@ -202,6 +218,11 @@ impl Engine {
     fn save(&self) -> Result<()> {
         save_provider(&self.device.provider, &self.provider_path)?;
         crate::persist::write_private(&self.state_path, &serde_json::to_vec(&self.stored)?)
+    }
+
+    /// Every group name this device knows (`RENAME`), for the conversation list.
+    pub fn group_names(&self) -> Vec<(String, String)> {
+        self.stored.conversations.iter().filter_map(|(id, c)| Some((id.clone(), c.name.clone()?))).collect()
     }
 
     pub fn conversation(&self, id: &str) -> Option<&ConversationState> {
@@ -358,7 +379,13 @@ impl Engine {
     /// The new-device path: commit ourselves in from the newest GroupInfo this account sealed.
     async fn self_join(&mut self, api: &Api, conversation: &str, frames: &[Value]) -> Result<bool> {
         let Some(keyring) = self.keyring.clone() else { return Ok(false) };
-        let mut ours: Vec<&Value> = frames.iter().filter(|f| f["kind"] == "groupinfo" && f["sender"] == self.user_id.as_str()).collect();
+        // Only a GroupInfo of the current generation: one from before a start-over would fork the
+        // group (`newestGroupInfo` in `mls.js`, Telium #66).
+        let generation = newest_generation(frames);
+        let mut ours: Vec<&Value> = frames
+            .iter()
+            .filter(|f| f["kind"] == "groupinfo" && f["sender"] == self.user_id.as_str() && of_generation(f, generation))
+            .collect();
         ours.sort_by_key(|f| std::cmp::Reverse(f["seq"].as_u64().unwrap_or(0)));
         for frame in ours {
             let Ok(info) = keyring.open(frame["ciphertext"].as_str().unwrap_or_default()) else { continue };
@@ -447,6 +474,8 @@ impl Engine {
             "dead": state.messages.iter().filter(|m| m.deleted).map(|m| m.id.clone()).collect::<Vec<_>>(),
             "pins": state.pins.iter().map(|(t, (by, author, snippet))| json!({ "t": t, "by": by, "author": author, "snippet": snippet })).collect::<Vec<_>>(),
             "sfu": state.call_sfu,
+            "name": state.name,
+            "renames": state.renames,
         });
         self.queue_mirror(conversation, "rx", Value::Array(rx));
         self.queue_mirror(conversation, "cx", cx);
@@ -553,6 +582,18 @@ impl Engine {
             }
             if state.call_sfu.is_none() {
                 state.call_sfu = cx["sfu"].as_str().map(str::to_owned);
+            }
+            if state.name.is_none() && state.renames.is_empty() {
+                state.name = cx["name"].as_str().filter(|n| rhein_mls::payload::valid_group_name(n)).map(str::to_owned);
+                state.renames = cx["renames"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| serde_json::from_value::<Rename>(r.clone()).ok())
+                    .filter(|r| !r.id.is_empty() && !r.by.is_empty() && r.name.as_deref().is_none_or(rhein_mls::payload::valid_group_name))
+                    .collect();
+                let excess = state.renames.len().saturating_sub(RENAME_LOG_MAX);
+                state.renames.drain(..excess);
             }
         }
         Ok(())
@@ -700,7 +741,11 @@ impl Engine {
             if !self.self_join(api, conversation, &everything).await? {
                 let state = self.stored.conversations.entry(conversation.to_owned()).or_default();
                 if !state.rejoin_requested {
-                    api.send_frame(conversation, &json!({ "kind": "rejoin", "ciphertext": "", "epoch": 0 })).await?;
+                    // Which leaf is ours and how far we walked, so whoever answers can replace a
+                    // leaf we hold no state for instead of taking it as already answered.
+                    let seen = frames.iter().filter_map(|f| f["seq"].as_u64()).max().unwrap_or(0).max(state.last_seq);
+                    let body = rejoin_body(&vault::b64(self.device.signature_public_key()), seen);
+                    api.send_frame(conversation, &json!({ "kind": "rejoin", "ciphertext": body, "epoch": 0 })).await?;
                     state.rejoin_requested = true;
                 }
             }
@@ -744,6 +789,8 @@ impl Engine {
     fn absorb(&mut self, conversation: &str, frame: &Value, sender: &str, device: &str, payload: Payload) -> bool {
         let id = frame["id"].as_str().unwrap_or_default().to_owned();
         let (signals, me) = (self.signals, self.user_id.clone());
+        // Renaming is the group policy's `policy` right, as `applyRename` checks it.
+        let may_rename = self.may_rename(conversation, sender);
         let state = self.stored.conversations.entry(conversation.to_owned()).or_default();
         let author_of = |state: &ConversationState, target: &str| state.messages.iter().find(|m| m.id == target).map(|m| m.sender.clone());
         match payload {
@@ -799,6 +846,15 @@ impl Engine {
             Payload::CallSfu { endpoint } => {
                 state.call_sfu = endpoint.filter(|e| (e.starts_with("https://") || e.starts_with("http://")) && e.len() <= 512);
             }
+            Payload::Rename { name } if may_rename => {
+                state.name = name.clone();
+                if !id.is_empty() && !state.renames.iter().any(|r| r.id == id) {
+                    let at = frame["created_at"].as_i64().unwrap_or(0);
+                    state.renames.push(Rename { id: id.clone(), by: sender.to_owned(), name, at });
+                    let excess = state.renames.len().saturating_sub(RENAME_LOG_MAX);
+                    state.renames.drain(..excess);
+                }
+            }
             // How far someone has read, kept only while we send our own, and only forward.
             Payload::Receipt(receipt) if signals.read && sender != me => {
                 if let Some(read) = receipt["read"].as_str() {
@@ -853,6 +909,25 @@ impl Engine {
         vault::open_attachment(&bytes, attachment["key"].as_str().unwrap_or_default(), attachment["iv"].as_str().unwrap_or_default())
     }
 
+    /// Whether `user` may rename the group: anyone in a group without a policy, else whom the
+    /// policy's `policy` rule names.
+    pub fn may_rename(&self, conversation: &str, user: &str) -> bool {
+        let Some(group) = self.groups.get(conversation) else { return false };
+        match rhein_mls::policy_of(group) {
+            Ok(None) => true,
+            Ok(Some(policy)) => policy.allows(policy.policy, user),
+            Err(_) => false,
+        }
+    }
+
+    /// Names the group (`None` or a blank name clears it), for everyone in it.
+    pub async fn rename(&mut self, api: &Api, conversation: &str, name: &str) -> Result<String> {
+        if !self.may_rename(conversation, &self.user_id.clone()) {
+            bail!("This group's rules do not let you rename it.");
+        }
+        self.send(api, conversation, Payload::Rename { name: rhein_mls::payload::clean_group_name(name) }).await
+    }
+
     /// Encrypts and sends one payload; our own copy is kept right away (we can't decrypt it
     /// later). Returns the frame id.
     pub async fn send(&mut self, api: &Api, conversation: &str, payload: Payload) -> Result<String> {
@@ -873,5 +948,46 @@ impl Engine {
         self.flush_mirror(api).await;
         self.save()?;
         Ok(sent["id"].as_str().unwrap_or_default().to_owned())
+    }
+}
+
+/// The body of a `rejoin` frame (`rejoin.js`): `key:<leaf signature key>`, with `;seen:<seq>` when
+/// this device has walked any frames. Older readers ignore the suffix and judge by device id.
+pub fn rejoin_body(key_b64: &str, seen: u64) -> String {
+    if seen > 0 { format!("key:{key_b64};seen:{seen}") } else { format!("key:{key_b64}") }
+}
+
+/// The newest start-over generation the frames carry, if any does.
+fn newest_generation(frames: &[Value]) -> Option<u64> {
+    frames.iter().filter_map(|f| f["generation"].as_u64()).max()
+}
+
+/// Whether a frame belongs to `generation` or later; frames that name none (or 0) always do.
+fn of_generation(frame: &Value, generation: Option<u64>) -> bool {
+    match (generation, frame["generation"].as_u64()) {
+        (Some(current), Some(g)) if g > 0 => g >= current,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejoin_bodies_match_the_web_client() {
+        assert_eq!(rejoin_body("AAAA", 0), "key:AAAA");
+        assert_eq!(rejoin_body("AAAA", 42), "key:AAAA;seen:42");
+    }
+
+    #[test]
+    fn group_info_is_taken_from_the_current_generation() {
+        let frames = vec![json!({ "generation": 1 }), json!({ "generation": 3 }), json!({})];
+        assert_eq!(newest_generation(&frames), Some(3));
+        assert!(!of_generation(&json!({ "generation": 2 }), Some(3)));
+        assert!(of_generation(&json!({ "generation": 3 }), Some(3)));
+        assert!(of_generation(&json!({ "generation": 0 }), Some(3)));
+        assert!(of_generation(&json!({}), Some(3)));
+        assert!(of_generation(&json!({ "generation": 1 }), None));
     }
 }

@@ -8,7 +8,7 @@
 
 use aes_gcm::aead::{Aead as _, KeyInit as _};
 use aes_gcm::{Aes256Gcm, Nonce};
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac as _};
@@ -133,6 +133,10 @@ impl Keyring {
     }
 }
 
+/// A vault kept in a custody mode Telium retired: only a device already holding the keyring,
+/// or the web client converting it, opens it.
+const RETIRED: &str = "this vault uses a custody mode Telium retired; open the Telium web client once to convert it";
+
 /// What opening the vault came to.
 #[derive(Debug)]
 pub enum Opened {
@@ -168,27 +172,37 @@ pub fn open_vault(vault: &Value, wrapper: Option<&Key>, local: Option<&Keyring>)
                 None => Ok(Opened::Locked { mode, reason: "sign in with your password once on this device" }),
             }
         }
+        // Retired by Telium (server 0.5.0): the server no longer hands out the escrow key, so
+        // such a vault is locked until the web client converts it, not an error that stops the
+        // rest of DM bring-up.
         "escrowed" => {
-            let escrow: Key = unb64(vault["escrow_key"].as_str().ok_or_else(|| anyhow!("the server did not return its escrow key"))?)?
-                .try_into()
-                .map_err(|_| anyhow!("bad escrow key"))?;
-            ring(Keyring::decode(&open(&escrow, ciphertext)?)?)
+            let escrow: Option<Key> = vault["escrow_key"].as_str().and_then(|k| unb64(k).ok()).and_then(|k| k.try_into().ok());
+            if let Some(escrow) = escrow
+                && let Ok(bytes) = open(&escrow, ciphertext)
+            {
+                return ring(Keyring::decode(&bytes)?);
+            }
+            match local {
+                Some(local) => ring(local.clone()),
+                None => Ok(Opened::Locked { mode, reason: RETIRED }),
+            }
         }
         "device_custody" | "self_custody" => match local {
             Some(local) => ring(local.clone()),
-            None => Ok(Opened::Locked { mode, reason: "a trusted device has to hand the key over" }),
+            None => Ok(Opened::Locked { mode, reason: RETIRED }),
         },
-        other => bail!("unknown recovery custody mode: {other}"),
+        _ => Ok(Opened::Locked { mode, reason: "this vault uses a custody mode this build does not know" }),
     }
 }
 
 /// The body for `PUT /vault` that creates a fresh `opaque_custody` vault, for an account that has
-/// none yet (one registered with Rhein).
-pub fn new_vault_body(keyring: &Keyring, wrapper: &Key) -> Value {
+/// none yet (one registered with Rhein). `recovery` adds the recovery key's copy of the keyring,
+/// as the web client's sign-up does, so a password reset can bring the history back.
+pub fn new_vault_body(keyring: &Keyring, wrapper: &Key, recovery: Option<&crate::recovery::RecoveryKey>) -> Value {
     serde_json::json!({
         "mode": "opaque_custody",
         "ciphertext": seal(wrapper, &keyring.encode()),
-        "independent_ciphertext": null,
+        "independent_ciphertext": recovery.map(|r| r.seal_vault_copy(keyring)),
         // Compare-and-swap: written only if the account has no vault yet, so a vault another
         // device made meanwhile is never overwritten.
         "expected_version": 0,
@@ -252,5 +266,11 @@ mod tests {
         let escrow = rand_bytes::<32>();
         let escrowed = json!({ "exists": true, "mode": "escrowed", "ciphertext": seal(&escrow, &ring.encode()), "escrow_key": b64(&escrow) });
         assert!(matches!(open_vault(&escrowed, None, None).unwrap(), Opened::Ring { .. }));
+        // Telium 0.5 no longer serves the escrow key: locked, not an error.
+        let retired = json!({ "exists": true, "mode": "escrowed", "ciphertext": seal(&escrow, &ring.encode()) });
+        assert!(matches!(open_vault(&retired, None, None).unwrap(), Opened::Locked { .. }));
+        assert!(matches!(open_vault(&retired, None, Some(&ring)).unwrap(), Opened::Ring { .. }));
+        let unknown = json!({ "exists": true, "mode": "something_new", "ciphertext": "" });
+        assert!(matches!(open_vault(&unknown, Some(&wrapper), None).unwrap(), Opened::Locked { .. }));
     }
 }

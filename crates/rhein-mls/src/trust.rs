@@ -9,7 +9,9 @@
 //!   guardians. Clients pin what they have seen and refuse rollbacks and forks.
 //!
 //! Web peers accept a device of an account with an identity key only when all of this checks
-//! out; accounts without one are accepted as they are.
+//! out. Since Telium desktop 0.4.0 they also refuse an account with no identity key at all once
+//! their own home advertises `identity.continuity`, so every account needs one: Rhein makes it
+//! at sign-in when the account has none (`IdentityKey::generate`, published `create_only`).
 
 use std::collections::BTreeMap;
 
@@ -96,6 +98,11 @@ pub fn pkcs8(seed: &[u8; 32]) -> Vec<u8> {
 }
 
 impl IdentityKey {
+    /// A new account key, for an account that has none yet.
+    pub fn generate() -> IdentityKey {
+        IdentityKey { secret: SigningKey::from_bytes(&crate::vault::rand_bytes()) }
+    }
+
     pub fn from_secret(bytes: &[u8]) -> Result<IdentityKey> {
         Ok(IdentityKey { secret: SigningKey::from_bytes(&ed25519_seed(bytes)?) })
     }
@@ -438,6 +445,19 @@ mod revocation_tests {
         let revoked = revoked_keys("@a:x", None, Some(&public), &statements);
         assert_eq!(revoked.into_iter().collect::<Vec<_>>(), vec!["KEY1".to_owned()]);
         assert!(revoked_keys("@a:x", None, None, &statements).is_empty());
+    }
+
+    #[test]
+    fn a_generated_key_binds_and_seals_as_the_web_reads_it() {
+        let key = IdentityKey::generate();
+        let public = key.public_b64();
+        assert!(key.binds("@a:x", &public));
+        assert!(!IdentityKey::generate().binds("@a:x", &public));
+        let ring = Keyring::generate();
+        let sealed = seal_cross_signing_secret(&key, &ring);
+        assert!(sealed.starts_with(RECOVERY_SEAL));
+        let opened = open_cross_signing_secret(&sealed, &ring).unwrap();
+        assert_eq!(opened.public_b64(), public);
     }
 }
 
