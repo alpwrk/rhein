@@ -156,6 +156,8 @@ enum Update {
     Link { user: String, up: bool },
     Video { user: String, slot: Slot, feed: Option<VideoFeed> },
     Failed(String),
+    /// Something to tell the person; the call goes on.
+    Notice(String),
     /// A live seat is being retaken: connecting again, not connected.
     Connecting,
     /// The call cannot go on from here: the client ends it and, when a reason is carried, says
@@ -334,6 +336,11 @@ impl Client {
                 let alive = this.update(cx, |this, cx| {
                     // The call is over from the call task's side (the server removed the seat,
                     // or the seat could not be retaken): end it as a hang-up would.
+                    if let Update::Notice(text) = &update {
+                        this.error = Some(text.clone().into());
+                        cx.notify();
+                        return true;
+                    }
                     if matches!(update, Update::Ended(_)) {
                         let reason = match update {
                             Update::Ended(reason) => reason,
@@ -376,7 +383,7 @@ impl Client {
                         Update::Failed(err) => call.status = CallStatus::Failed(err),
                         Update::Connecting => call.status = CallStatus::Connecting,
                         // Handled above, before the call is borrowed.
-                        Update::Ended(_) => {}
+                        Update::Ended(_) | Update::Notice(_) => {}
                     }
                     cx.notify();
                     true
@@ -1655,12 +1662,16 @@ async fn sfu_seat(
         let mut audit_at = state.guild.as_ref().map(|_| tokio::time::Instant::now() + AUDIT_PERIOD);
         let mut renew_at = token_ttl.filter(|_| state.guild.is_some()).map(|ttl| tokio::time::Instant::now() + renew_after(ttl));
         let mut key_check_at = tokio::time::Instant::now();
+        // Republishes after a `telium.media-limit` mute, per slot, so a loop cannot run forever.
+        let mut media_repairs: std::collections::HashMap<Slot, u32> = std::collections::HashMap::new();
         // Every way out of the loop breaks with a reason.
         let end = loop {
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(Command::Watch { user, on }) => call.watch(&user, on),
                     Some(Command::Publish { slot, video }) => {
+                        // A deliberate fresh attempt starts the repair count over.
+                        media_repairs.remove(&slot);
                         if let Err(err) = call.publish_video(slot, &video).await {
                             let _ = updates.send(Update::Failed(format!("{err:#}")));
                         }
@@ -1749,6 +1760,27 @@ async fn sfu_seat(
                         };
                     }
                     CallEvent::Dropped(reason) => break SeatEnd::Dropped(reason),
+                    // A screen nobody here watches is not worth a word.
+                    CallEvent::RemoteMediaLimited { ref from, slot: Slot::Screen } if !call.is_watching(from) => {}
+                    CallEvent::MediaLimited { slot, max_bitrate } => {
+                        // The SFU muted our video for declaring more than the ceiling: send the
+                        // same capture again, smaller. Twice at most, then say so.
+                        let tries = media_repairs.entry(slot).or_insert(0u32);
+                        *tries += 1;
+                        let what = if slot == Slot::Screen { "screen share" } else { "camera" };
+                        let repaired = if *tries <= 2 { call.shrink(slot, max_bitrate).await } else { Ok(false) };
+                        match repaired {
+                            Ok(true) => log::info!("{what} republished under the relay's limit"),
+                            Ok(false) => {
+                                let _ = updates.send(Update::Notice(format!(
+                                    "The voice relay paused your {what} for using more bandwidth than it allows. Turn it off and on, or lower its quality."
+                                )));
+                            }
+                            Err(err) => {
+                                let _ = updates.send(Update::Notice(format!("The voice relay paused your {what}, and sending it smaller failed: {err:#}")));
+                            }
+                        }
+                    }
                     CallEvent::KeyTrouble { .. } => {
                         // This device is opening nobody's media: it is probably a commit behind.
                         // Ask the group where it stands, but not on every failed track.
@@ -1857,6 +1889,10 @@ fn media(engine: &AudioEngine, updates: &mpsc::UnboundedSender<Update>, event: C
             let _ = updates.send(Update::Link { user, up });
         }
         CallEvent::Error(err) => log::warn!("call: {err}"),
+        CallEvent::RemoteMediaLimited { from, slot } => {
+            let what = if slot == Slot::Screen { "screen share" } else { "camera" };
+            let _ = updates.send(Update::Notice(format!("The voice relay paused {from}'s {what} for using more bandwidth than it allows; it comes back when they send it smaller.")));
+        }
         _ => {}
     }
 }

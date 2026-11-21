@@ -39,7 +39,11 @@ impl Client {
         let Some((private, public)) = secrets.mls_signature.clone() else { return };
         let (Ok(private), Ok(public)) = (rhein_mls::vault::unb64(&private), rhein_mls::vault::unb64(&public)) else { return };
         let engine = match Engine::open(&user, &device, (&private, &public), secrets.keyring.clone()) {
-            Ok(engine) => Arc::new(Mutex::new(engine)),
+            Ok(engine) => {
+                // Group names this device already opened, for the list before anything syncs.
+                self.dm_names.extend(engine.group_names());
+                Arc::new(Mutex::new(engine))
+            }
             Err(err) => {
                 self.dm_error = Some(format!("{err:#}"));
                 return;
@@ -128,6 +132,10 @@ impl Client {
 
     /// Mirrors a conversation's decrypted state into its log.
     fn apply_dm(&mut self, id: &str, state: ConversationState, cx: &mut Context<Self>) {
+        match &state.name {
+            Some(name) => self.dm_names.insert(id.to_owned(), name.clone()),
+            None => self.dm_names.remove(id),
+        };
         let me = self.user_id().unwrap_or_default().to_owned();
         match state.seen_upto(&me).filter(|_| self.signal("read", Some(id), false)) {
             Some(seen) => self.dm_seen.insert(id.to_owned(), seen),
@@ -231,6 +239,11 @@ impl Client {
     /// Sends a signal payload (reaction, edit, delete) in a DM.
     pub(super) fn dm_payload(&mut self, id: String, payload: Payload, cx: &mut Context<Self>) {
         self.dm_run(id, cx, move |engine, api, conv| Box::pin(async move { engine.send(&api, &conv, payload).await.map(drop) }));
+    }
+
+    /// Names a group conversation for everyone in it; a blank name clears it.
+    pub fn rename_dm(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+        self.dm_run(id, cx, move |engine, api, conv| Box::pin(async move { engine.rename(&api, &conv, &name).await.map(drop) }));
     }
 
     fn dm_run(

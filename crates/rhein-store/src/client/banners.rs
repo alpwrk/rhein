@@ -136,6 +136,14 @@ impl Client {
                 out.push(Banner { key: format!("protocol:{}", server.name), text: format!("Can't connect to {}: {reason}. Update Rhein.", server.name), urgent: true, action: None });
             }
         }
+        if self.dm.as_ref().is_some_and(|d| d.unsaved_recovery_key.is_some()) {
+            out.push(Banner {
+                key: "recovery-key-unsaved".into(),
+                text: "Save your recovery key: without it a forgotten password loses your encrypted history. It is in Settings → Encryption.".into(),
+                urgent: true,
+                action: None,
+            });
+        }
         out.extend(self.update_banner());
         out.retain(|b| !self.dismissed_banners.contains(&b.key));
         out

@@ -15,6 +15,7 @@ pub mod call_group;
 pub mod payload;
 pub mod sealed_sync;
 pub mod policy;
+pub mod recovery;
 pub mod trust;
 pub mod vault;
 

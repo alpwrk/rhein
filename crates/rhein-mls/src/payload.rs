@@ -13,6 +13,22 @@ pub const DELETE: u8 = 0x05;
 pub const PIN: u8 = 0x06;
 pub const CALL_SFU: u8 = 0x07;
 pub const DELIVERED: u8 = 0x08;
+pub const RENAME: u8 = 0x09;
+
+/// A group name is at most this many characters (`GROUP_NAME_MAX` in `mls.js`).
+pub const GROUP_NAME_MAX: usize = 100;
+
+/// A name as it is sent: whitespace runs collapsed, trimmed, capped; empty means no name.
+pub fn clean_group_name(text: &str) -> Option<String> {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let capped: String = collapsed.chars().take(GROUP_NAME_MAX).collect();
+    Some(capped.trim().to_owned()).filter(|n| !n.is_empty())
+}
+
+/// What a received name must already be: trimmed, not empty, not too long.
+pub fn valid_group_name(text: &str) -> bool {
+    text.trim() == text && !text.is_empty() && text.chars().count() <= GROUP_NAME_MAX
+}
 
 /// The marker in front of a body that carries more than text (attachments, a reply).
 pub const ENVELOPE: &str = "\u{0000}telium/dm-body/1\n";
@@ -30,6 +46,8 @@ pub enum Payload {
     Pin { target: String, add: bool, author: String, snippet: String },
     CallSfu { endpoint: Option<String> },
     Delivered(Value),
+    /// A group's name, or `None` to clear it so the group shows its people again.
+    Rename { name: Option<String> },
     Unknown,
 }
 
@@ -62,6 +80,7 @@ impl Payload {
             }
             Payload::CallSfu { endpoint } => pack(CALL_SFU, &json!({ "endpoint": endpoint }).to_string()),
             Payload::Delivered(v) => pack(DELIVERED, &v.to_string()),
+            Payload::Rename { name } => pack(RENAME, &json!({ "name": name }).to_string()),
             Payload::Unknown => Vec::new(),
         }
     }
@@ -97,6 +116,13 @@ impl Payload {
                 .unwrap_or(Payload::Unknown),
             CALL_SFU => json().map(|v| Payload::CallSfu { endpoint: s(&v, "endpoint") }).unwrap_or(Payload::Unknown),
             DELIVERED => Payload::Delivered(json().unwrap_or(Value::Null)),
+            RENAME => json()
+                .and_then(|v| match v.get("name")? {
+                    Value::Null => Some(Payload::Rename { name: None }),
+                    Value::String(n) if valid_group_name(n) => Some(Payload::Rename { name: Some(n.clone()) }),
+                    _ => None,
+                })
+                .unwrap_or(Payload::Unknown),
             _ => Payload::Unknown,
         }
     }
@@ -156,6 +182,14 @@ mod tests {
             assert_eq!(Payload::decode(&p.encode()), p);
         }
         assert_eq!(Payload::decode(&[0x42, b'x']), Payload::Unknown);
+        // RENAME, as `setGroupName` packs it.
+        assert_eq!(Payload::decode(&pack(RENAME, r#"{"name":"Book club"}"#)), Payload::Rename { name: Some("Book club".into()) });
+        assert_eq!(Payload::decode(&pack(RENAME, r#"{"name":null}"#)), Payload::Rename { name: None });
+        assert_eq!(Payload::decode(&pack(RENAME, r#"{"name":" padded "}"#)), Payload::Unknown);
+        assert_eq!(Payload::decode(&pack(RENAME, &format!(r#"{{"name":"{}"}}"#, "x".repeat(101)))), Payload::Unknown);
+        assert_eq!(Payload::decode(&Payload::Rename { name: Some("A".into()) }.encode()), Payload::Rename { name: Some("A".into()) });
+        assert_eq!(clean_group_name("  Book \n  club "), Some("Book club".into()));
+        assert_eq!(clean_group_name("   "), None);
         assert_eq!(Payload::decode(&pack(REACTION, "not json")), Payload::Unknown);
     }
 

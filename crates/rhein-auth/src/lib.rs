@@ -29,6 +29,11 @@ pub fn unb64u(text: &str) -> Result<Vec<u8>> {
     URL_SAFE_NO_PAD.decode(text).context("invalid base64url")
 }
 
+/// The key-stretching set `SerenityKsf::memory_constrained` is, as Telium numbers them
+/// (`accounts.opaque_ksf_version`, the web client's `KSF_VERSIONS`). Sent at registration, and
+/// checked against what the server says an account's record was made with before signing in.
+pub const KSF_VERSION: i64 = 1;
+
 /// serenity-kit's `CustomKsf`, with its default configuration.
 pub struct SerenityKsf {
     argon: Argon2<'static>,

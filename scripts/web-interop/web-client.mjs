@@ -40,7 +40,7 @@ const ops = {
     const secure = await loginOpaque(base, user, password, 'web (rhein interop)');
     const session = secure.session;
     const home = new Api({ base, token: session.access_token, domain: session.server_name });
-    const ring = await vault.load(home, null, session.user_id, secure.recoveryWrapper, null);
+    const ring = await vault.load(home, session.user_id, secure.recoveryWrapper, null);
     const mls = new Mls(home, { userId: session.user_id, deviceId: session.device_id });
     await mls.adoptRecoveryKey(ring);
     await mls.start();

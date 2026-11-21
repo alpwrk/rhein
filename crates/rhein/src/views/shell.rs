@@ -929,6 +929,32 @@ impl Shell {
         }
     }
 
+    /// A group conversation's menu: renaming it (inside the encryption, for everyone in it).
+    fn group_menu(&mut self, id: String, title: String, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
+        let entries = vec![MenuEntry::item("Rename group", move |window, cx| {
+            let (id, title) = (id.clone(), title.clone());
+            this.update(cx, |v, cx| {
+                let client = v.client.clone();
+                v.prompt(
+                    "Rename group",
+                    vec![("Group name (blank shows its people)".into(), title)],
+                    "Rename",
+                    move |values, cx| {
+                        let name = values.into_iter().next().unwrap_or_default();
+                        let id = id.clone();
+                        client.update(cx, |c, cx| c.rename_dm(id, name, cx));
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .with_icon(Icon::Pencil)];
+        self.menu.show(at, entries, |v: &mut Shell| &mut v.menu, window, cx);
+    }
+
     fn channel_menu(&mut self, channel_id: String, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         // Developer mode (on by default) shows the "Copy … ID" entries.
         let dev = self.client.read(cx).prefs.developer_mode;
@@ -2736,16 +2762,29 @@ impl Shell {
             } else {
                 Avatar::new(other.clone(), title.clone()).size(px(20.)).into_any_element()
             };
+            let group = conversation.kind == "gc";
+            let (menu_id, menu_title) = (conversation.id.clone(), title.clone());
             rows.push(
-                ListRow::new(SharedString::from(format!("conv-{}", conversation.id)), title)
-                    .leading(leading)
-                    .selected(selected)
-                    .strong(unread)
-                    .when(request, |r| r.trailing(Tag("REQUEST")))
-                    .on_click(move |_, _, cx| {
-                        let id = id.clone();
-                        c.update(cx, |c, cx| c.open_conversation(Some(id), cx));
+                div()
+                    .when(group, |d| {
+                        d.on_mouse_down(
+                            gpui::MouseButton::Right,
+                            cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| {
+                                this.group_menu(menu_id.clone(), menu_title.clone(), e.position, window, cx)
+                            }),
+                        )
                     })
+                    .child(
+                        ListRow::new(SharedString::from(format!("conv-{}", conversation.id)), title)
+                            .leading(leading)
+                            .selected(selected)
+                            .strong(unread)
+                            .when(request, |r| r.trailing(Tag("REQUEST")))
+                            .on_click(move |_, _, cx| {
+                                let id = id.clone();
+                                c.update(cx, |c, cx| c.open_conversation(Some(id), cx));
+                            }),
+                    )
                     .into_any_element(),
             );
         }

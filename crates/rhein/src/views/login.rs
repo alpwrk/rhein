@@ -13,6 +13,8 @@ pub struct LoginView {
     password: Entity<TextInput>,
     /// The two-factor code, asked for when the server wants one.
     code: Entity<TextInput>,
+    /// A registration code, for a home server that registers by invitation only.
+    registration_code: Entity<TextInput>,
     /// What was signed in with, kept while the code is asked for.
     pending: Option<(String, String, String)>,
     code_focused: bool,
@@ -33,7 +35,8 @@ impl LoginView {
         let user = cx.new(|cx| TextInput::new("Username", cx));
         let password = cx.new(|cx| TextInput::new("Password", cx).masked());
         let code = cx.new(|cx| TextInput::new("123456", cx));
-        let subs = [&server, &user, &password, &code]
+        let registration_code = cx.new(|cx| TextInput::new("Only if the server gave you one", cx));
+        let subs = [&server, &user, &password, &code, &registration_code]
             .into_iter()
             .map(|input| {
                 cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
@@ -47,7 +50,7 @@ impl LoginView {
         // The first empty field: the server in a release, the username with the dev default.
         let first = if server.read(cx).text().is_empty() { &server } else { &user };
         window.focus(&first.focus_handle(cx), cx);
-        Self { client, server, user, password, code, pending: None, code_focused: false, register: false, focus, _subs: subs }
+        Self { client, server, user, password, code, registration_code, pending: None, code_focused: false, register: false, focus, _subs: subs }
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -60,7 +63,7 @@ impl LoginView {
                 return;
             }
             self.code.update(cx, |c, cx| c.clear(cx));
-            self.client.update(cx, |client, cx| client.sign_in(server, user, password, false, Some(code), cx));
+            self.client.update(cx, |client, cx| client.sign_in(server, user, password, false, Some(code), None, cx));
             return;
         }
         let server = self.server.read(cx).text().to_owned();
@@ -76,9 +79,11 @@ impl LoginView {
             return;
         }
         let register = self.register;
+        let registration_code = Some(self.registration_code.read(cx).text().trim().to_owned())
+            .filter(|c| register && !c.is_empty());
         self.password.update(cx, |p, cx| p.clear(cx));
         self.pending = Some((server.clone(), user.clone(), password.clone()));
-        self.client.update(cx, |client, cx| client.sign_in(server, user, password, register, None, cx));
+        self.client.update(cx, |client, cx| client.sign_in(server, user, password, register, None, registration_code, cx));
     }
 }
 
@@ -159,6 +164,7 @@ impl Render for LoginView {
                     .when(!asking_code, |d| {
                         d.child(field("Home server", &self.server)).child(field("Username", &self.user)).child(field("Password", &self.password))
                     })
+                    .when(!asking_code && register, |d| d.child(field("Registration code", &self.registration_code)))
                     .when(asking_code, |d| d.child(field("Two-factor code", &self.code)))
                     .child(
                         Button::new(

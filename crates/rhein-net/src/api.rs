@@ -345,6 +345,14 @@ impl Api {
         self.get("/crosssigning").await
     }
 
+    /// Publishes this account's first cross-signing key. `create_only`: the server refuses (409)
+    /// when any key is already stored, so a browser creating one at the same moment cannot be
+    /// overwritten, nor overwrite us.
+    pub async fn create_cross_signing(&self, identity_key: &str, sealed_secret: &str) -> ApiResult<serde_json::Value> {
+        let body = serde_json::json!({ "identity_key": identity_key, "sealed_secret": sealed_secret, "create_only": true });
+        self.put("/crosssigning", &body).await
+    }
+
     pub async fn sign_device(&self, device_id: &str, mls_key: &str, signature: &str) -> ApiResult<serde_json::Value> {
         let body = serde_json::json!({ "mls_key": mls_key, "signature": signature });
         self.put(&format!("/crosssigning/devices/{}", urlencoding::encode(device_id)), &body).await
